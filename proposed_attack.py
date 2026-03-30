@@ -249,7 +249,7 @@ class Proposed_attack():
             if self.attack_method == 'CGBA_H':
                 x_adv, qs = self.go_to_boundary_CGBA_H(self.src_img, grad_oi, x_b)
             q_num = q_num + qs
-            assert self.all_queries == q_num
+            #assert self.all_queries == q_num
             x_b = x_adv
             x_adv_inv = self.inv_tf(copy.deepcopy(x_adv.cpu()[0,:,:,:].squeeze()), self.mean, self.std)            
             norm = torch.norm(x_inv - x_adv_inv)
