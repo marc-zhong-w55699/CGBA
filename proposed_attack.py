@@ -277,11 +277,10 @@ class Proposed_attack():
             n_query.append(q_num)
         
         # ── 最终汇总 ──────────────────────────────────────────────
-        print(f'\n── Query 统计 ──────────────────────────────────')
+        print(f'\n── Query num ──────────────────────────────────')
         print(f'Gradient estimation queries : {total_grad_queries}')
         print(f'Boundary search queries     : {total_boundary_queries}')
         print(f'Total queries               : {q_num}')
-        print(f'Grad ratio                  : {total_grad_queries/q_num*100:.1f}%')
         print(f'────────────────────────────────────────────────')
 
         x_adv = clip_image_values(x_adv, self.lb, self.ub)           
