@@ -219,73 +219,73 @@ class Proposed_attack():
 
 
     def Attack(self):
-    norms = []
-    n_query = []
-    grad = 0   
-    total_grad_queries     = 0  # ← 新增
-    total_boundary_queries = 0  # ← 新增
+        norms = []
+        n_query = []
+        grad = 0   
+        total_grad_queries     = 0  # ← 新增
+        total_boundary_queries = 0  # ← 新增
 
-    x_inv = self.inv_tf(copy.deepcopy(self.src_img.cpu()[0,:,:,:].squeeze()), self.mean, self.std)
-    if self.tar_img == None:
-        x_random, query_random= self.find_random_adversarial(self.src_img)
-    if self.tar_img != None:
-        x_random, query_random= self.tar_img, 0
-    x_b, query_b = self.bin_search(self.src_img, x_random)
-    x_b_inv = self.inv_tf(copy.deepcopy(x_b.cpu()[0,:,:,:].squeeze()), self.mean, self.std) 
-    norm_initial = torch.norm(x_b_inv - x_inv)
-    norms.append(norm_initial)
-    q_num = query_random + query_b
-    print('Initial boundary norm', torch.norm(norm_initial).item())
-    print('initial query', q_num)
-    n_query.append(q_num)
-    size = self.src_img.shape
-    
-    for i in range(self.iteration):
-        q_opt = int(self.N0*np.sqrt(i+1)) 
-        if self.dim_reduc_factor < 1.0:
-            raise Exception("The dimension reduction factor should be greater than 1 for reduced dimension, and should be 1 for Full dimensional image space.")
-        if self.dim_reduc_factor > 1.0:
-            random_vec_o = self.find_random(self.src_img, q_opt) 
-        else:
-            random_vec_o = torch.randn(q_opt,3,size[-2],size[-1]) 
-
-        grad_oi, ratios = self.normal_vector_approximation_batch(x_b, q_opt, random_vec_o)
-        
-        q_num = q_num + q_opt
-        total_grad_queries += q_opt  # ← 新增
-
-        if self.attack_method == 'CGBA':
-            x_adv, qs = self.go_to_boundary_CGBA(self.src_img, grad_oi, x_b)
-        if self.attack_method == 'CGBA_H':
-            x_adv, qs = self.go_to_boundary_CGBA_H(self.src_img, grad_oi, x_b)
-
-        q_num = q_num + qs
-        total_boundary_queries += qs  # ← 新增
-
-        x_b = x_adv
-        x_adv_inv = self.inv_tf(copy.deepcopy(x_adv.cpu()[0,:,:,:].squeeze()), self.mean, self.std)            
-        norm = torch.norm(x_inv - x_adv_inv)
-
-        if i%4==0 or i==self.iteration-1:
-            if self.verbose_control == 'Yes':
-                print('iteration -> ' + str(i) + 
-                      '   Queries ' + str(q_num) + 
-                      ' norm is -> ' + f'{norm.item():.3f}' +
-                      f'   grad_q={q_opt}  boundary_q={qs}')  # ← 新增
-
-        norms.append(norm)
+        x_inv = self.inv_tf(copy.deepcopy(self.src_img.cpu()[0,:,:,:].squeeze()), self.mean, self.std)
+        if self.tar_img == None:
+            x_random, query_random= self.find_random_adversarial(self.src_img)
+        if self.tar_img != None:
+            x_random, query_random= self.tar_img, 0
+        x_b, query_b = self.bin_search(self.src_img, x_random)
+        x_b_inv = self.inv_tf(copy.deepcopy(x_b.cpu()[0,:,:,:].squeeze()), self.mean, self.std) 
+        norm_initial = torch.norm(x_b_inv - x_inv)
+        norms.append(norm_initial)
+        q_num = query_random + query_b
+        print('Initial boundary norm', torch.norm(norm_initial).item())
+        print('initial query', q_num)
         n_query.append(q_num)
-        
-    # ── 最终汇总 ──────────────────────────────────────────────
-    print(f'\n── Query num ──────────────────────────────────')
-    print(f'Gradient estimation queries : {total_grad_queries}')
-    print(f'Boundary search queries     : {total_boundary_queries}')
-    print(f'Total queries               : {q_num}')
-    print(f'Grad ratio                  : {total_grad_queries/q_num*100:.1f}%')
-    print(f'────────────────────────────────────────────────')
+        size = self.src_img.shape
+    
+        for i in range(self.iteration):
+            q_opt = int(self.N0*np.sqrt(i+1)) 
+            if self.dim_reduc_factor < 1.0:
+                raise Exception("The dimension reduction factor should be greater than 1 for reduced dimension, and should be 1 for Full dimensional image space.")
+            if self.dim_reduc_factor > 1.0:
+                random_vec_o = self.find_random(self.src_img, q_opt) 
+            else:
+                random_vec_o = torch.randn(q_opt,3,size[-2],size[-1]) 
 
-    x_adv = clip_image_values(x_adv, self.lb, self.ub)           
-    return x_adv, n_query, norms
+            grad_oi, ratios = self.normal_vector_approximation_batch(x_b, q_opt, random_vec_o)
+        
+            q_num = q_num + q_opt
+            total_grad_queries += q_opt  # ← 新增
+
+            if self.attack_method == 'CGBA':
+                x_adv, qs = self.go_to_boundary_CGBA(self.src_img, grad_oi, x_b)
+            if self.attack_method == 'CGBA_H':
+                x_adv, qs = self.go_to_boundary_CGBA_H(self.src_img, grad_oi, x_b)
+
+            q_num = q_num + qs
+            total_boundary_queries += qs  # ← 新增
+
+            x_b = x_adv
+            x_adv_inv = self.inv_tf(copy.deepcopy(x_adv.cpu()[0,:,:,:].squeeze()), self.mean, self.std)            
+            norm = torch.norm(x_inv - x_adv_inv)
+
+            if i%4==0 or i==self.iteration-1:
+                if self.verbose_control == 'Yes':
+                    print('iteration -> ' + str(i) + 
+                         '   Queries ' + str(q_num) + 
+                        ' norm is -> ' + f'{norm.item():.3f}' +
+                        f'   grad_q={q_opt}  boundary_q={qs}')  # ← 新增
+
+            norms.append(norm)
+            n_query.append(q_num)
+        
+        # ── 最终汇总 ──────────────────────────────────────────────
+        print(f'\n── Query 统计 ──────────────────────────────────')
+        print(f'Gradient estimation queries : {total_grad_queries}')
+        print(f'Boundary search queries     : {total_boundary_queries}')
+        print(f'Total queries               : {q_num}')
+        print(f'Grad ratio                  : {total_grad_queries/q_num*100:.1f}%')
+        print(f'────────────────────────────────────────────────')
+
+        x_adv = clip_image_values(x_adv, self.lb, self.ub)           
+        return x_adv, n_query, norms
 
 
 
