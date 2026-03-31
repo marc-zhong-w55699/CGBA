@@ -132,7 +132,9 @@ class Proposed_attack():
         num_calls = 1
         eta = eta_o/torch.norm(eta_o)
         v = (x_b - x_s)/torch.norm(x_b - x_s)
-        theta = torch.acos(torch.dot(eta.reshape(-1), v.reshape(-1)))  
+        dot_val = torch.dot(eta.reshape(-1), v.reshape(-1)).clamp(-1.0, 1.0)
+        theta = torch.acos(dot_val)
+        #theta = torch.acos(torch.dot(eta.reshape(-1), v.reshape(-1)))  
         while True:
             m = (torch.sin(theta)*torch.cos(theta/(pow(2, num_calls)))/torch.sin(theta/(pow(2,num_calls)))-torch.cos(theta)).item()
             zeta = (eta + m*v)/torch.norm(eta + m*v)
@@ -152,7 +154,9 @@ class Proposed_attack():
         num_calls = 1
         eta = eta_o/torch.norm(eta_o)
         v = (x_b - x_s)/torch.norm(x_b - x_s)
-        theta = torch.acos(torch.dot(eta.reshape(-1), v.reshape(-1)))
+        dot_val = torch.dot(eta.reshape(-1), v.reshape(-1)).clamp(-1.0, 1.0)
+        theta = torch.acos(dot_val)
+        #theta = torch.acos(torch.dot(eta.reshape(-1), v.reshape(-1)))
         while True:   
             m = (torch.sin(theta.cpu())*torch.cos(torch.tensor([(math.pi/2)])*(1 - 1/pow(2, num_calls)))/torch.sin(torch.tensor([(math.pi/2)])*(1 - 1/pow(2, num_calls)))-torch.cos(theta.cpu())).item()
             zeta = (eta + m*v)/torch.norm(eta + m*v)
@@ -179,7 +183,9 @@ class Proposed_attack():
         while True:
             mid_dir = adv_dir + clean_dir
             mid_dir = mid_dir/torch.norm(mid_dir)
-            theta = torch.acos(torch.dot(boundary_dir.reshape(-1), mid_dir.reshape(-1))/ (torch.linalg.norm(boundary_dir)*torch.linalg.norm(mid_dir)))
+            dot_val = (torch.dot(boundary_dir.reshape(-1), mid_dir.reshape(-1)) /(torch.linalg.norm(boundary_dir) * torch.linalg.norm(mid_dir))).clamp(-1.0, 1.0)
+            theta = torch.acos(dot_val)
+            #theta = torch.acos(torch.dot(boundary_dir.reshape(-1), mid_dir.reshape(-1))/ (torch.linalg.norm(boundary_dir)*torch.linalg.norm(mid_dir)))
             d = torch.cos(theta)*norm_dis
             x_mid = x_0 + mid_dir*d
             num_calls +=1
@@ -192,7 +198,8 @@ class Proposed_attack():
             if torch.norm(adv-clean).cpu().numpy()<self.tol:
                 break
             if num_calls >100:
-                break      
+                break   
+        adv = clip_image_values(adv, self.lb, self.ub)   
         return adv, num_calls
     
     
