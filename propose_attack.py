@@ -55,17 +55,46 @@ class Proposed_attack():
     
     
     def find_random_adversarial(self, image):
-        num_calls = 1       
-        step = 0.02
-        perturbed = image        
-        while self.is_adversarial(perturbed) == -1:           
-            pert = torch.randn(image.shape)
-            pert = pert.to(self.device)   
-            perturbed = image + num_calls*step* pert
-            perturbed = clip_image_values(perturbed, self.lb, self.ub)
-            perturbed = perturbed.to(self.device)
-            num_calls += 1   
-        return perturbed, num_calls 
+        """替换原来的随机初始化，改用低频结构化方向"""
+        num_calls = 0
+        step = 1.0
+
+        while True:
+            # 1. 低频随机方向（4×4上采样）
+            H, W = image.shape[2], image.shape[3]
+            v_low = torch.randn(image.shape[0], image.shape[1], 4, 4).to(self.device)
+            v_dir = F.interpolate(
+                v_low, size=(H, W),
+                mode='bilinear', align_corners=False
+            )
+            v_dir = v_dir / torch.norm(v_dir)
+
+            # 2. 指数步长向外试探
+            d_test = step
+            x_test = clip_image_values(image + d_test * v_dir, self.lb, self.ub)
+            num_calls += 1
+
+            while self.is_adversarial(x_test) == -1 and d_test < 100:
+                d_test *= 2.0
+                x_test = clip_image_values(image + d_test * v_dir, self.lb, self.ub)
+                num_calls += 1
+
+            # 3. 找到对抗样本，二分搜索精确定位边界
+            if self.is_adversarial(x_test) == 1:
+                d_low  = 0.0
+                d_high = d_test
+
+                for _ in range(10):
+                    d_mid = (d_low + d_high) / 2.0
+                    x_mid = clip_image_values(image + d_mid * v_dir, self.lb, self.ub)
+                    num_calls += 1
+                    if self.is_adversarial(x_mid) == 1:
+                        d_high = d_mid
+                    else:
+                        d_low  = d_mid
+
+                x_init = clip_image_values(image + d_high * v_dir, self.lb, self.ub)
+                return x_init, num_calls 
     
     
     
