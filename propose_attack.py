@@ -67,7 +67,9 @@ class Proposed_attack():
                 v_low, size=(H, W),
                 mode='bilinear', align_corners=False
             )
-            v_dir = v_dir / torch.norm(v_dir)
+            # 安全归一化 (防批量崩溃防除零)
+            v_norm = torch.norm(v_dir, p=2, dim=(1, 2, 3), keepdim=True)
+            v_dir = v_dir / (v_norm + 1e-8)
 
             # 2. 指数步长向外试探
             d_test = step
@@ -81,7 +83,7 @@ class Proposed_attack():
 
             # 3. 找到对抗样本，二分搜索精确定位边界
             if self.is_adversarial(x_test) == 1:
-                d_low  = 0.0
+                d_low  = d_test / 2.0  # 核心优化：从上一个失败的点开始！
                 d_high = d_test
 
                 for _ in range(10):
