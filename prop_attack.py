@@ -54,7 +54,7 @@ class Proposed_attack():
     
     
     
-    def find_random_adversarial(self, image, step=2.0, eps_max=20, n=50):
+    def find_random_adversarial(self, image, step=2.0, eps_max=15, n=60):
         num_calls = 0
         perturbed = image
         candidate = image
@@ -72,7 +72,7 @@ class Proposed_attack():
 
             while is_adv == -1 and eps <= eps_max:
                 eps += step
-                candidate = clip_image_values(image + eps * u, self.lb, self.ub).to(self.device)
+                candidate = clip_image_values(candidate + eps * u, self.lb, self.ub).to(self.device)
                 is_adv = self.is_adversarial(candidate)
                 num_calls += 1
 
