@@ -54,7 +54,7 @@ class Proposed_attack():
     
     
     
-    def find_random_adversarial(self, image, step=0.02, eps_max=10, n=1000):
+    def find_random_adversarial(self, image, step=0.5, eps_max=10, n=10):
         num_calls = 0
         perturbed = image
 
@@ -98,7 +98,7 @@ class Proposed_attack():
                 adv = mid
             else:
                 cln = mid   
-            if torch.norm(adv-cln).cpu().numpy()<self.tol or num_calls>=100:
+            if torch.norm(adv-cln).cpu().numpy()<self.tol or num_calls>=50:
                 break       
         return adv, num_calls 
     
