@@ -54,7 +54,7 @@ class Proposed_attack():
     
     
     
-    def find_random_adversarial(self, image, step=1.0, eps_max=30, n=10):
+    def find_random_adversarial(self, image, step=2.0, eps_max=30, n=30):
         num_calls = 0
         perturbed = image
         max_calls=50
