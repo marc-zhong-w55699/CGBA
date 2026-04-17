@@ -54,7 +54,7 @@ class Proposed_attack():
     
     
     
-    def find_random_adversarial(self, image, step=2.0, eps_max=15, n=60):
+    def find_random_adversarial(self, image, step=3.0, eps_max=15, n=60):
         num_calls = 0
         perturbed = image
         candidate = image
@@ -65,7 +65,7 @@ class Proposed_attack():
             u = u / torch.norm(u)
 
             # Walk along u until adversarial or distance exceeds eps_max
-            eps = 0.0
+            eps = 0.01
             candidate = clip_image_values(candidate + eps * u, self.lb, self.ub).to(self.device)
             is_adv = self.is_adversarial(candidate)
             num_calls += 1
