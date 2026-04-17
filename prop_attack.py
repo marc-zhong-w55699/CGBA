@@ -54,10 +54,10 @@ class Proposed_attack():
     
     
     
-    def find_random_adversarial(self, image, step=0.5, eps_max=10, n=10):
+    def find_random_adversarial(self, image, step=1.0, eps_max=30, n=10):
         num_calls = 0
         perturbed = image
-
+        max_calls=50
         for _ in range(n):
             # Sample a unit direction u ~ N(0, I_d)
             u = torch.randn(image.shape).to(self.device)
@@ -78,7 +78,7 @@ class Proposed_attack():
             # If adversarial point found, binary-search back to the boundary
             if is_adv == 1:
                 perturbed = candidate
-                x_b, bin_calls = self.bin_search(image, perturbed)
+                x_b, bin_calls = self.bin_search(image, perturbed,max_calls)
                 num_calls += bin_calls
                 return x_b, num_calls
 
@@ -87,7 +87,7 @@ class Proposed_attack():
     
     
     
-    def bin_search(self, x_0, x_random):  
+    def bin_search(self, x_0, x_random,max_calls=100):  
         num_calls = 0
         adv = x_random
         cln = x_0      
@@ -98,7 +98,7 @@ class Proposed_attack():
                 adv = mid
             else:
                 cln = mid   
-            if torch.norm(adv-cln).cpu().numpy()<self.tol or num_calls>=50:
+            if torch.norm(adv-cln).cpu().numpy()<self.tol or num_calls>=max_calls:
                 break       
         return adv, num_calls 
     
