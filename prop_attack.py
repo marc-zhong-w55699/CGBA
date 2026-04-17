@@ -65,7 +65,8 @@ class Proposed_attack():
             u = u / torch.norm(u)
 
             # Walk along u until adversarial or distance exceeds eps_max
-            eps = 0.01
+            #eps = 0.01
+            eps = step
             candidate = clip_image_values(candidate + eps * u, self.lb, self.ub).to(self.device)
             is_adv = self.is_adversarial(candidate)
             num_calls += 1
