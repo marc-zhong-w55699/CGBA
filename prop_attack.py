@@ -224,6 +224,115 @@ class Proposed_attack():
     
     
     
+    def _proj_and_normalize(self, vec, v_ref, eps=1e-8):
+        """
+        Project `vec` onto the hyperplane orthogonal to `v_ref`, then normalize.
+        Returns None if the projected vector is numerically zero.
+        """
+        vec = vec - torch.dot(vec.reshape(-1), v_ref.reshape(-1)) * v_ref
+        nrm = torch.norm(vec)
+        if nrm < eps:
+            return None
+        return vec / nrm
+
+
+
+    def manifold_search_2d(self, x_o, x_b,
+                           alpha=0.99,
+                           beta=math.pi / 30,
+                           beta_min=math.pi / 1000,
+                           n=None,
+                           u=None):
+        """
+        Algorithm 2: 2D Manifold Search.
+        Starting from an adversarial boundary point x_b, search within the 2D plane
+        spanned by v = (x_b - x_o)/||x_b - x_o|| and an orthogonal direction u,
+        simultaneously rotating (angle i*beta) and shrinking the radius r,
+        to find an adversarial point x_e closer to x_o.
+        If `u` is None, sample a random unit vector orthogonal to v.
+        Otherwise, re-orthogonalize the given u against v and normalize.
+        """
+        if n is None:
+            n = self.iteration
+        num_calls = 0
+
+        # --- Initialization: establish the 2D search plane ---
+        diff = x_b - x_o
+        r = torch.norm(diff)
+        v = diff / r
+
+        if u is None:
+            u = torch.randn(x_o.shape).to(self.device)
+        u = u.to(self.device)
+        u = u - torch.dot(u.reshape(-1), v.reshape(-1)) * v
+        u_norm = torch.norm(u)
+        if u_norm < 1e-8:
+            # Fallback: pathological case, resample
+            u = torch.randn(x_o.shape).to(self.device)
+            u = u - torch.dot(u.reshape(-1), v.reshape(-1)) * v
+            u_norm = torch.norm(u)
+        u = u / u_norm
+
+        # --- Find valid rotation direction at radius r ---
+        s = 0
+        cur_beta = beta
+        while cur_beta > beta_min:
+            cos_b, sin_b = math.cos(cur_beta), math.sin(cur_beta)
+
+            cand_p = clip_image_values(x_o + r * (v * cos_b + u * sin_b), self.lb, self.ub).to(self.device)
+            num_calls += 1
+            if self.is_adversarial(cand_p) == 1:
+                s = +1
+                break
+
+            cand_m = clip_image_values(x_o + r * (v * cos_b - u * sin_b), self.lb, self.ub).to(self.device)
+            num_calls += 1
+            if self.is_adversarial(cand_m) == 1:
+                s = -1
+                break
+
+            cur_beta = cur_beta / 2
+
+        if s == 0:
+            return x_b, num_calls
+
+        # --- Main loop: simultaneous rotation and shrinkage ---
+        x_s = x_b
+        x_e = x_b
+        for i in range(1, n + 1):
+            w = (x_s - x_o) / torch.norm(x_s - x_o)
+            alpha_i = alpha ** (1 + (n - i) / n)
+
+            # Shrink r while still adversarial along w
+            while True:
+                cand = clip_image_values(x_o + (alpha_i * r) * w, self.lb, self.ub).to(self.device)
+                num_calls += 1
+                if self.is_adversarial(cand) == 1:
+                    r = alpha_i * r
+                else:
+                    break
+                if r < 1e-6:
+                    break
+
+            x_r = x_o + r * w
+
+            # Rotate by i*beta in the (v, u) plane
+            angle = i * beta
+            cos_a, sin_a = math.cos(angle), math.sin(angle)
+            x_s_cand = clip_image_values(x_o + r * (v * cos_a + s * u * sin_a), self.lb, self.ub).to(self.device)
+            num_calls += 1
+            if self.is_adversarial(x_s_cand) != 1:
+                x_e = x_r
+                break
+            else:
+                x_s = x_s_cand
+                x_e = x_s
+
+        x_e = clip_image_values(x_e, self.lb, self.ub).to(self.device)
+        return x_e, num_calls
+
+
+
     def find_random(self, x, n):
         image_size = x.shape
         out = torch.zeros(n, 3, int(image_size[-2]), int(image_size[-1]))
@@ -256,45 +365,114 @@ class Proposed_attack():
         norms.append(norm_initial)
         q_num = query_random + query_b
         print('Initial boundary norm', torch.norm(norm_initial).item())
+        print('query_b',query_b)
         print('initial query', q_num)
+
         n_query.append(q_num)
         size = self.src_img.shape
     
-        for i in range(self.iteration):
-            q_opt = int(self.N0*np.sqrt(i+1)) 
-            if self.dim_reduc_factor < 1.0:
-                raise Exception("The dimension reduction factor should be greater than 1 for reduced dimension, and should be 1 for Full dimensional image space.")
-            if self.dim_reduc_factor > 1.0:
-                random_vec_o = self.find_random(self.src_img, q_opt) 
-            else:
-                random_vec_o = torch.randn(q_opt,3,size[-2],size[-1]) 
+        if self.attack_method == 'Manifold2D':
+            # Outer-loop strategy: re-establish the 2D plane each iteration,
+            # and synthesize the new tangent direction u from three sources:
+            #   d1: progress direction (x_e_prev - x_b_prev)
+            #   d2: previous tangent direction u_prev (momentum)
+            #   d3: random noise (exploration)
+            # Weights are constants for now (state-machine adaptation TBD).
+            outer_iter = self.iteration
+            inner_n = 10
+            lam1, lam2, lam3 = 0.4, 0.3, 0.3
 
-            grad_oi, ratios = self.normal_vector_approximation_batch(x_b, q_opt, random_vec_o)
-        
-            q_num = q_num + q_opt
-            total_grad_queries += q_opt  # ← 新增
+            u_prev = None
+            x_e_prev = None
+            x_b_prev = None
+            x_adv = x_b
 
-            if self.attack_method == 'CGBA':
-                x_adv, qs = self.go_to_boundary_CGBA(self.src_img, grad_oi, x_b)
-            if self.attack_method == 'CGBA_H':
-                x_adv, qs = self.go_to_boundary_CGBA_H(self.src_img, grad_oi, x_b)
+            for it in range(outer_iter):
+                diff = x_b - self.src_img
+                r_cur = torch.norm(diff)
+                if r_cur < 1e-8:
+                    break
+                v_new = diff / r_cur
 
-            q_num = q_num + qs
-            total_boundary_queries += qs  # ← 新增
+                d1 = self._proj_and_normalize(x_e_prev - x_b_prev, v_new) \
+                     if (x_e_prev is not None and x_b_prev is not None) else None
+                d2 = self._proj_and_normalize(u_prev, v_new) if u_prev is not None else None
+                d3 = self._proj_and_normalize(torch.randn(x_b.shape).to(self.device), v_new)
 
-            x_b = x_adv
-            x_adv_inv = self.inv_tf(copy.deepcopy(x_adv.cpu()[0,:,:,:].squeeze()), self.mean, self.std)            
-            norm = torch.norm(x_inv - x_adv_inv)
+                # Cold start or degenerate: fall back to pure noise
+                if d1 is None and d2 is None:
+                    u_new = d3
+                else:
+                    combo = lam3 * d3
+                    if d1 is not None:
+                        combo = combo + lam1 * d1
+                    if d2 is not None:
+                        combo = combo + lam2 * d2
+                    u_new = self._proj_and_normalize(combo, v_new)
+                    if u_new is None:
+                        u_new = d3
 
-            if i%4==0 or i==self.iteration-1:
-                if self.verbose_control == 'Yes':
-                    print('iteration -> ' + str(i) + 
-                         '   Queries ' + str(q_num) + 
-                        ' norm is -> ' + f'{norm.item():.3f}' +
-                        f'   grad_q={q_opt}  boundary_q={qs}')  # ← 新增
+                x_adv, qs = self.manifold_search_2d(
+                    self.src_img, x_b, n=inner_n, u=u_new
+                )
 
-            norms.append(norm)
-            n_query.append(q_num)
+                x_e_prev = x_adv
+                x_b_prev = x_b
+                u_prev = u_new
+                x_b = x_adv
+
+                q_num = q_num + qs
+                total_boundary_queries += qs
+
+                x_adv_inv = self.inv_tf(copy.deepcopy(x_adv.cpu()[0,:,:,:].squeeze()), self.mean, self.std)
+                norm = torch.norm(x_inv - x_adv_inv)
+
+                if it % 4 == 0 or it == outer_iter - 1:
+                    if self.verbose_control == 'Yes':
+                        print('Manifold2D iter -> ' + str(it) +
+                              '   Queries ' + str(q_num) +
+                              '   norm -> ' + f'{norm.item():.3f}' +
+                              f'   inner_q={qs}')
+
+                norms.append(norm)
+                n_query.append(q_num)
+
+        else:
+            for i in range(self.iteration):
+                q_opt = int(self.N0*np.sqrt(i+1)) 
+                if self.dim_reduc_factor < 1.0:
+                    raise Exception("The dimension reduction factor should be greater than 1 for reduced dimension, and should be 1 for Full dimensional image space.")
+                if self.dim_reduc_factor > 1.0:
+                    random_vec_o = self.find_random(self.src_img, q_opt) 
+                else:
+                    random_vec_o = torch.randn(q_opt,3,size[-2],size[-1]) 
+
+                grad_oi, ratios = self.normal_vector_approximation_batch(x_b, q_opt, random_vec_o)
+            
+                q_num = q_num + q_opt
+                total_grad_queries += q_opt  # ← 新增
+
+                if self.attack_method == 'CGBA':
+                    x_adv, qs = self.go_to_boundary_CGBA(self.src_img, grad_oi, x_b)
+                if self.attack_method == 'CGBA_H':
+                    x_adv, qs = self.go_to_boundary_CGBA_H(self.src_img, grad_oi, x_b)
+
+                q_num = q_num + qs
+                total_boundary_queries += qs  # ← 新增
+
+                x_b = x_adv
+                x_adv_inv = self.inv_tf(copy.deepcopy(x_adv.cpu()[0,:,:,:].squeeze()), self.mean, self.std)            
+                norm = torch.norm(x_inv - x_adv_inv)
+
+                if i%4==0 or i==self.iteration-1:
+                    if self.verbose_control == 'Yes':
+                        print('iteration -> ' + str(i) + 
+                             '   Queries ' + str(q_num) + 
+                            ' norm is -> ' + f'{norm.item():.3f}' +
+                            f'   grad_q={q_opt}  boundary_q={qs}')  # ← 新增
+
+                norms.append(norm)
+                n_query.append(q_num)
         
         # ── 最终汇总 ──────────────────────────────────────────────
         print(f'\n── Query num ──────────────────────────────────')
