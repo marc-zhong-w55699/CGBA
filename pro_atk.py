@@ -242,7 +242,7 @@ class Proposed_attack():
         norms.append(norm_initial)
         q_num = query_random + query_b
         print('Initial boundary norm', torch.norm(norm_initial).item())
-        print('query_b',query_b)
+        print('query_bin_search',query_b)
         print('initial query', q_num)
 
         n_query.append(q_num)
