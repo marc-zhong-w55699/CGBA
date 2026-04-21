@@ -9,7 +9,7 @@ import math
 
 
 class Proposed_attack():
-    def __init__(self, model, src_img, mean, std, lb, ub,
+    def __init__(self, model, src_img, mean, std, lb, ub, dim_reduc_factor=4,
                  tar_img=None, iteration=93, tol=0.0001,attack_method = 'manifold_search_2d',
                  verbose_control='Yes'):
         self.model = model
@@ -25,6 +25,8 @@ class Proposed_attack():
         self.ub = ub
         self.tol = tol
         self.verbose_control = verbose_control
+        self.attack_method = attack_method
+        self.dim_reduc_factor = dim_reduc_factor
 
         # print(f'Source imge lbl: {self.src_lbl}     Targeted image lbl: {self.tar_lbl}')
         
