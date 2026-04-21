@@ -50,10 +50,11 @@ class Proposed_attack():
     
     
     def find_random_adversarial(self, image, step=3.0, eps_max=15, n=60):
+        # Returns a raw adversarial point (NOT refined to the boundary).
+        # Caller is expected to run bin_search to snap it onto the boundary.
         num_calls = 0
         perturbed = image
         candidate = image
-        max_calls=50
         for _ in range(n):
             # Sample a unit direction u ~ N(0, I_d)
             u = torch.randn(image.shape).to(self.device)
@@ -72,12 +73,8 @@ class Proposed_attack():
                 is_adv = self.is_adversarial(candidate)
                 num_calls += 1
 
-            # If adversarial point found, binary-search back to the boundary
             if is_adv == 1:
-                perturbed = candidate
-                x_b, bin_calls = self.bin_search(image, perturbed,max_calls)
-                num_calls += bin_calls
-                return x_b, num_calls
+                return candidate, num_calls
 
         print("Warning: find_random_adversarial failed to find an adversarial direction after {} trials, falling back to cumulative random walk.".format(n))
         # Fallback: cumulative random-walk strategy (from proposed_attack.py).
