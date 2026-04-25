@@ -11,6 +11,25 @@ if not os.path.exists('./pytorch-cifar'):
 sys.path.append('./pytorch-cifar')
 from models.preact_resnet import PreActResNet18
 
+# ── ViT (from lucidrains/vit-pytorch) ─────────────────────────────────────────
+# pip install vit-pytorch
+from vit_pytorch import ViT
+
+
+def build_vit_cifar10():
+
+    return ViT(
+        image_size  = 32,
+        patch_size  = 4,
+        num_classes = 10,
+        dim         = 384,
+        depth       = 7,
+        heads       = 12,
+        mlp_dim     = 384 * 4,
+        dropout     = 0.1,
+        emb_dropout = 0.1,
+    )
+
 
 # ── WideResNet 40-2 ───────────────────────────────────────────────────────────
 class WideBlock(nn.Module):
@@ -71,6 +90,8 @@ def load_model(model_name, ckpt_dir='checkpoints', device='cpu'):
         net = PreActResNet18()
     elif model_name == 'wideresnet40_2':
         net = WideResNet(depth=40, widen_factor=2, dropout=0.3, num_classes=10)
+    elif model_name == 'vit':
+        net = build_vit_cifar10()
     else:
         raise ValueError(f'Unknown model: {model_name}')
 
