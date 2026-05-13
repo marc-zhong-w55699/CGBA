@@ -28,8 +28,8 @@ CIFAR10_CLASSES = [
 ]
 
 num_img          = 50
-iteration        = 100       # SurFree steps
-max_queries      = 1000      # SurFree query budget per image
+iteration        = 1000      # SurFree steps (loose upper bound; will stop at max_queries)
+max_queries      = 10000     # SurFree query budget per image
 attack_methods   = ['SurFree']
 dim_reduc_factor = 4         # kept for filename compatibility; SurFree ignores it
 
