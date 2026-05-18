@@ -7,17 +7,23 @@ import math
 
 
 # ============================================================================
-# Tuned variant of pro_attack_explore.py (explore, λ=0.2,0.2,0.6)
-# ★ Changes vs pro_attack_explore.py:
-#     tol     : 1e-4 → 1e-5     (tighter bin_search precision)
-#     inner_n : 10   → 15       (longer inner-loop budget)
-#     β       : π/30 (unchanged — DO NOT reduce; disrupts state machine)
+# ImageNet variant of pro_attack_explore_tuned.py (explore, λ=0.2,0.2,0.6)
+# ★ Changes vs pro_attack_explore_tuned.py:
+#     iteration : 93   → 1600   (ImageNet q/iter ≈ 6, target ~10000 total q)
+#     tol       : 1e-5 (unchanged)
+#     inner_n   : 15   (unchanged — early-break dominates on ImageNet anyway)
+#     β         : π/30 (unchanged)
+#     λ         : 0.2, 0.2, 0.6 (explore — best untuned variant on ImageNet)
+# ----------------------------------------------------------------------------
+# Iso-query rationale (from explore@iter=1200 npz on ResNet-50):
+#     median q/iter = 6.07, init q = 142
+#     iter=1600 ⇒ predicted total q ≈ 142 + 1600*6.07 ≈ 9854   ✓
 # ============================================================================
 
 
 class Proposed_attack():
     def __init__(self, model, src_img, mean, std, lb, ub, dim_reduc_factor=4,
-                 tar_img=None, iteration=93, tol=1e-5, attack_method='manifold_search_2d',  # ★ tol=1e-5
+                 tar_img=None, iteration=1600, tol=1e-5, attack_method='manifold_search_2d',  # ★ iter=1600
                  verbose_control='Yes'):
         self.model = model
         self.src_img = src_img
@@ -225,7 +231,7 @@ class Proposed_attack():
         size = self.src_img.shape
 
         outer_iter = self.iteration
-        inner_n = 15                          # ★ original: 10
+        inner_n = 15                          # ★ unchanged
         lam1, lam2, lam3 = 0.2, 0.2, 0.6      # explore
 
         u_prev = None
@@ -272,7 +278,7 @@ class Proposed_attack():
             x_adv_inv = self.inv_tf(copy.deepcopy(x_adv.cpu()[0,:,:,:].squeeze()), self.mean, self.std)
             norm = torch.norm(x_inv - x_adv_inv)
 
-            if it % 4 == 0 or it == outer_iter - 1:
+            if it % 20 == 0 or it == outer_iter - 1:    # ★ 1600 iter 太多, print 频率降到 1/20
                 if self.verbose_control == 'Yes':
                     print('Manifold2D iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
