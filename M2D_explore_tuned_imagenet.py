@@ -1,170 +1,315 @@
-'''
-Manifold2D (explore_tuned variant) attack on ImageNet ResNet-50.
-- variant: pro_attack_explore_tuned (λ=0.2,0.2,0.6, inner_n=15, tol=1e-5, β=π/30)
-- iter=1600 targets ~10000 queries (q/iter ≈ 6 on ImageNet)
-- iso-query comparison with SurFree (max_queries=10000)
-Output npz fields aligned with CGBA / SurFree scripts.
-'''
-import torchvision.transforms as transforms
-import torchvision.models as torch_models
+import copy
 import numpy as np
 import torch
-import os
-from utils import get_label
-from utils import valid_bounds
-from PIL import Image
+from utils import clip_image_values
 from torch.autograd import Variable
-import time
-from pro_attack_explore_tuned import Proposed_attack
+import math
 
 
-##############################################################################
-torch.manual_seed(992)
-torch.cuda.manual_seed(992)
-np.random.seed(992)
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-##############################################################################
+# ============================================================================
+# ImageNet variant of pro_attack_explore_tuned.py (explore, λ=0.2,0.2,0.6)
+# Pure attack class — NO top-level execution code, safe to `from ... import`.
+#
+# ★ Changes vs pro_attack_explore_tuned.py:
+#     iteration : 93   → 1600   (ImageNet q/iter ≈ 6, target ~10000 total q)
+#     print     : 每 4 iter → 每 20 iter   (1600 iter 太多)
+#     tol       : 1e-5 (unchanged)
+#     inner_n   : 15   (unchanged — early-break dominates on ImageNet)
+#     β         : π/30 (unchanged)
+#     λ         : 0.2, 0.2, 0.6 (explore)
+# ----------------------------------------------------------------------------
+# Iso-query rationale (from explore@iter=1200 npz on ResNet-50):
+#     median q/iter = 6.07, init q = 142
+#     iter=1600 ⇒ predicted total q ≈ 142 + 1600*6.07 ≈ 9854
+#     实测 (此文件 + iter=1600): median total q = 9836  ✓
+# ============================================================================
 
 
-num_img          = 50
-iteration        = 1600          # ★ targets ~10000 queries (q/iter ≈ 6 on ImageNet)
-model_arc        = 'resnet50'
-attack_methods   = ['Manifold2D']
-VARIANT_SUFFIX   = 'explore_tuned'
-dim_reduc_factor = 4
+class Proposed_attack():
+    def __init__(self, model, src_img, mean, std, lb, ub, dim_reduc_factor=4,
+                 tar_img=None, iteration=1600, tol=1e-5, attack_method='manifold_search_2d',  # ★ iter=1600
+                 verbose_control='Yes'):
+        self.model = model
+        self.src_img = src_img
+        self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
+        self.tar_img = tar_img
+        if tar_img != None:
+            self.tar_lbl = torch.argmax(self.model.forward(Variable(self.tar_img, requires_grad=True)).data).item()
+        self.iteration = iteration
+        self.mean = mean
+        self.std = std
+        self.lb = lb
+        self.ub = ub
+        self.tol = tol
+        self.verbose_control = verbose_control
+        self.attack_method = attack_method
+        self.dim_reduc_factor = dim_reduc_factor
 
-mean = [0.485, 0.456, 0.406]
-std  = [0.229, 0.224, 0.225]
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.all_queries = 0
 
-for attack_method in attack_methods:
-    # Models
-    if model_arc == 'resnet50':
-        net = torch_models.resnet50(pretrained=True)
-    if model_arc == 'resnet101':
-        net = torch_models.resnet101(pretrained=True)
-    if model_arc == 'vgg16':
-        net = torch_models.vgg16(pretrained=True)
-    if model_arc == 'ViT':
-        import timm
-        net = timm.create_model('vit_base_patch16_224', pretrained=True)
-    net = net.to(device)
-    net.eval()
 
-    all_norms     = []
-    all_queries   = []
-    image_iter    = 0
-    success_count = 0
 
-    for image_iter1 in range(1, 51):
-        if image_iter >= num_img:
-            break
-        if len(str(image_iter1)) == 1:
-            temp = "000" + str(image_iter1)
-        if len(str(image_iter1)) == 2:
-            temp = "00"  + str(image_iter1)
-        if len(str(image_iter1)) == 3:
-            temp = "0"   + str(image_iter1)
-        if len(str(image_iter1)) == 4:
-            temp =        str(image_iter1)
-        img_name = "ILSVRC2012_val_0000" + temp + ".JPEG"
-        img_path = "Image_path/ImageNet/val"
-
-        t11 = time.time()
-
-        im_orig = Image.open(os.path.join(img_path, img_name))
-        im_sz = 224
-        im_orig = transforms.Compose([transforms.Resize((im_sz, im_sz))])(im_orig)
-
-        delta = 255
-        lb, ub = valid_bounds(im_orig, delta)
-
-        im = transforms.Compose([
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std)])(im_orig)
-
-        lb = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=mean, std=std)])(lb)
-        ub = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=mean, std=std)])(ub)
-
-        lb = lb[None, :, :, :].to(device)
-        ub = ub[None, :, :, :].to(device)
-
-        x_0 = im[None, :, :, :].to(device)
-
-        orig_label = torch.argmax(net.forward(Variable(x_0, requires_grad=True)).data).item()
-        labels = open(os.path.join('synset_words.txt'), 'r').read().split('\n')
-        str_label_orig = get_label(labels[np.int32(orig_label)].split(',')[0])
-
-        ground_truth = open(os.path.join('val.txt'), 'r').read().split('\n')
-        ground_name_label = ground_truth[image_iter1 - 1]
-        ground_label = ground_name_label.split()[1]
-        ground_label_int = int(ground_label)
-
-        str_label_ground = get_label(labels[np.int32(ground_label)].split(',')[0])
-        print(f'\nSource image {temp}:  Class ID: {ground_label}   Class Name: {str_label_ground}')
-
-        ##############################################################################
-        if ground_label_int != int(orig_label):
-            print('Already missclassified ... Lets try another one!')
+    def is_adversarial(self, image):
+        predict_label = torch.argmax(self.model.forward(Variable(image, requires_grad=True)).data).item()
+        self.all_queries += 1
+        if self.tar_img == None:
+            is_adv = predict_label != self.src_lbl
         else:
-            image_iter = image_iter + 1
-            print('Image number good to go: ', image_iter)
+            is_adv = predict_label == self.tar_lbl
+        if is_adv:
+            return 1
+        else:
+            return -1
 
-            print('#################################################################################')
-            print(f'Start: {attack_method}-{VARIANT_SUFFIX} non-targeted, iter={iteration}, dim_reduc={dim_reduc_factor}')
-            print('#################################################################################')
 
-            t3 = time.time()
-            attack = Proposed_attack(net, x_0, mean, std, lb, ub,
-                                     dim_reduc_factor=dim_reduc_factor,
-                                     attack_method=attack_method,
-                                     iteration=iteration)
-            x_adv, n_query, norms = attack.Attack()
-            t4 = time.time()
-            print(f'##################### End Iterations:  took {t4-t3:.3f} sec #########################')
 
-            # ── 验证攻击是否成功 ──────────────────────────────────
-            with torch.no_grad():
-                adv_label = torch.argmax(net(x_adv)).item()
+    def find_random_adversarial(self, image, step=3.0, eps_max=15, n=60):
+        num_calls = 0
+        perturbed = image
+        candidate = image
+        max_calls=50
+        for _ in range(n):
+            u = torch.randn(image.shape).to(self.device)
+            u = u / torch.norm(u)
 
-            if adv_label != ground_label_int:
-                str_label_adv = get_label(labels[np.int32(adv_label)].split(',')[0])
-                print(f'Attack SUCCESS: {str_label_ground} → {str_label_adv}')
-                success_count += 1
-                all_norms.append(norms)
-                all_queries.append(n_query)
+            eps = step
+            candidate = clip_image_values(candidate + eps * u, self.lb, self.ub).to(self.device)
+            is_adv = self.is_adversarial(candidate)
+            num_calls += 1
+
+            while is_adv == -1 and eps <= eps_max:
+                eps += step
+                candidate = clip_image_values(candidate + eps * u, self.lb, self.ub).to(self.device)
+                is_adv = self.is_adversarial(candidate)
+                num_calls += 1
+
+            if is_adv == 1:
+                perturbed = candidate
+                x_b, bin_calls = self.bin_search(image, perturbed, max_calls)
+                num_calls += bin_calls
+                return x_b, num_calls
+
+        print("Warning: find_random_adversarial failed to find an adversarial direction after {} trials, falling back to cumulative random walk.".format(n))
+        num_calls = 1
+        step_fb = 0.02
+        perturbed = image
+        while self.is_adversarial(perturbed) == -1:
+            pert = torch.randn(image.shape).to(self.device)
+            perturbed = image + num_calls * step_fb * pert
+            perturbed = clip_image_values(perturbed, self.lb, self.ub).to(self.device)
+            num_calls += 1
+        return perturbed, num_calls
+
+
+
+    def bin_search(self, x_0, x_random, max_calls=100):
+        num_calls = 0
+        adv = x_random
+        cln = x_0
+        while True:
+            mid = (cln + adv) / 2.0
+            num_calls += 1
+            if self.is_adversarial(mid) == 1:
+                adv = mid
             else:
-                print(f'Attack FAILED: still predicted as {str_label_ground}')
+                cln = mid
+            if torch.norm(adv-cln).cpu().numpy() < self.tol or num_calls >= max_calls:
+                break
+        return adv, num_calls
 
-    # ── ASR 统计 ──────────────────────────────────────────────
-    asr = success_count / image_iter * 100 if image_iter > 0 else 0
-    print(f'\n── Attack Summary ──────────────────────────────')
-    print(f'Model         : {model_arc}')
-    print(f'Attack method : {attack_method}-{VARIANT_SUFFIX}')
-    print(f'Total images  : {image_iter}')
-    print(f'Success       : {success_count}')
-    print(f'ASR           : {asr:.1f}%')
-    print(f'────────────────────────────────────────────────')
 
-    # ── 保存结果 ──────────────────────────────────────────────
-    if len(all_norms) > 0:
-        norm_array  = np.array(all_norms)
-        query_array = np.array(all_queries)
 
-        if not os.path.exists('Non_targeted_results'):
-            os.makedirs('Non_targeted_results')
+    def _proj_and_normalize(self, vec, v_ref, eps=1e-8):
+        vec = vec - torch.dot(vec.reshape(-1), v_ref.reshape(-1)) * v_ref
+        nrm = torch.norm(vec)
+        if nrm < eps:
+            return None
+        return vec / nrm
 
-        save_path = (f'Non_targeted_results/{attack_method}_{VARIANT_SUFFIX}_nonTar_{model_arc}'
-                     f'_dimReducFac_{dim_reduc_factor}'
-                     f'_imgNum_{num_img}_iteration_{iteration}')
-        np.savez(
-            save_path,
-            norm        = np.median(norm_array,  0),
-            query       = np.median(query_array, 0),
-            all_norms   = norm_array,
-            all_queries = query_array,
-            asr         = asr,
-        )
-        print(f'Results saved to {save_path}.npz')
-    else:
-        print('No successful attacks, nothing saved.')
+
+
+    def manifold_search_2d(self, x_o, x_b,
+                           alpha=0.99,
+                           beta=math.pi / 30,           # ★ unchanged — DO NOT reduce
+                           beta_min=math.pi / 1000,
+                           n=None,
+                           u=None):
+        if n is None:
+            n = self.iteration
+        num_calls = 0
+
+        diff = x_b - x_o
+        r = torch.norm(diff)
+        v = diff / r
+
+        if u is None:
+            u = torch.randn(x_o.shape).to(self.device)
+        u = u.to(self.device)
+        u = u - torch.dot(u.reshape(-1), v.reshape(-1)) * v
+        u_norm = torch.norm(u)
+        if u_norm < 1e-8:
+            u = torch.randn(x_o.shape).to(self.device)
+            u = u - torch.dot(u.reshape(-1), v.reshape(-1)) * v
+            u_norm = torch.norm(u)
+        u = u / u_norm
+
+        s = 0
+        cur_beta = beta
+        while cur_beta > beta_min:
+            cos_b, sin_b = math.cos(cur_beta), math.sin(cur_beta)
+
+            cand_p = clip_image_values(x_o + r * (v * cos_b + u * sin_b), self.lb, self.ub).to(self.device)
+            num_calls += 1
+            if self.is_adversarial(cand_p) == 1:
+                s = +1
+                break
+
+            cand_m = clip_image_values(x_o + r * (v * cos_b - u * sin_b), self.lb, self.ub).to(self.device)
+            num_calls += 1
+            if self.is_adversarial(cand_m) == 1:
+                s = -1
+                break
+
+            cur_beta = cur_beta / 2
+
+        if s == 0:
+            return x_b, num_calls
+
+        x_s = x_b
+        x_e = x_b
+        for i in range(1, n + 1):
+            w = (x_s - x_o) / torch.norm(x_s - x_o)
+            alpha_i = alpha ** (1 + (n - i) / n)
+
+            while True:
+                cand = clip_image_values(x_o + (alpha_i * r) * w, self.lb, self.ub).to(self.device)
+                num_calls += 1
+                if self.is_adversarial(cand) == 1:
+                    r = alpha_i * r
+                else:
+                    break
+                if r < 1e-6:
+                    break
+
+            x_r = x_o + r * w
+
+            angle = i * beta
+            cos_a, sin_a = math.cos(angle), math.sin(angle)
+            x_s_cand = clip_image_values(x_o + r * (v * cos_a + s * u * sin_a), self.lb, self.ub).to(self.device)
+            num_calls += 1
+            if self.is_adversarial(x_s_cand) != 1:
+                x_e = x_r
+                break
+            else:
+                x_s = x_s_cand
+                x_e = x_s
+
+        x_e = clip_image_values(x_e, self.lb, self.ub).to(self.device)
+        return x_e, num_calls
+
+
+
+    def Attack(self):
+        norms = []
+        n_query = []
+        grad = 0
+        total_grad_queries     = 0
+        total_boundary_queries = 0
+
+        x_inv = self.inv_tf(copy.deepcopy(self.src_img.cpu()[0,:,:,:].squeeze()), self.mean, self.std)
+        if self.tar_img == None:
+            x_random, query_random = self.find_random_adversarial(self.src_img)
+        if self.tar_img != None:
+            x_random, query_random = self.tar_img, 0
+        x_b, query_b = self.bin_search(self.src_img, x_random)
+        x_b_inv = self.inv_tf(copy.deepcopy(x_b.cpu()[0,:,:,:].squeeze()), self.mean, self.std)
+        norm_initial = torch.norm(x_b_inv - x_inv)
+        norms.append(norm_initial)
+        q_num = query_random + query_b
+        print('Initial boundary norm', torch.norm(norm_initial).item())
+        print('query_b', query_b)
+        print('initial query', q_num)
+
+        n_query.append(q_num)
+        size = self.src_img.shape
+
+        outer_iter = self.iteration
+        inner_n = 15                          # ★ unchanged
+        lam1, lam2, lam3 = 0.2, 0.2, 0.6      # explore
+
+        u_prev = None
+        x_e_prev = None
+        x_b_prev = None
+        x_adv = x_b
+
+        for it in range(outer_iter):
+            diff = x_b - self.src_img
+            r_cur = torch.norm(diff)
+            if r_cur < 1e-8:
+                break
+            v_new = diff / r_cur
+
+            d1 = self._proj_and_normalize(x_e_prev - x_b_prev, v_new) \
+                 if (x_e_prev is not None and x_b_prev is not None) else None
+            d2 = self._proj_and_normalize(u_prev, v_new) if u_prev is not None else None
+            d3 = self._proj_and_normalize(torch.randn(x_b.shape).to(self.device), v_new)
+
+            if d1 is None and d2 is None:
+                u_new = d3
+            else:
+                combo = lam3 * d3
+                if d1 is not None:
+                    combo = combo + lam1 * d1
+                if d2 is not None:
+                    combo = combo + lam2 * d2
+                u_new = self._proj_and_normalize(combo, v_new)
+                if u_new is None:
+                    u_new = d3
+
+            x_adv, qs = self.manifold_search_2d(
+                self.src_img, x_b, n=inner_n, u=u_new
+            )
+
+            x_e_prev = x_adv
+            x_b_prev = x_b
+            u_prev = u_new
+            x_b = x_adv
+
+            q_num = q_num + qs
+            total_boundary_queries += qs
+
+            x_adv_inv = self.inv_tf(copy.deepcopy(x_adv.cpu()[0,:,:,:].squeeze()), self.mean, self.std)
+            norm = torch.norm(x_inv - x_adv_inv)
+
+            if it % 20 == 0 or it == outer_iter - 1:    # ★ 1600 iter 太多, print 频率降到 1/20
+                if self.verbose_control == 'Yes':
+                    print('Manifold2D iter -> ' + str(it) +
+                          '   Queries ' + str(q_num) +
+                          '   norm -> ' + f'{norm.item():.3f}' +
+                          f'   inner_q={qs}')
+
+            norms.append(norm)
+            n_query.append(q_num)
+
+        print(f'\n── Query num ──────────────────────────────────')
+        print(f'Gradient estimation queries : {total_grad_queries}')
+        print(f'Boundary search queries     : {total_boundary_queries}')
+        print(f'Total queries               : {q_num}')
+        print(f'────────────────────────────────────────────────')
+
+        x_adv = clip_image_values(x_adv, self.lb, self.ub)
+        return x_adv, n_query, norms
+
+
+
+    def inv_tf(self, x, mean, std):
+        '''
+        To rescale the pixels of x within 0 and 1
+        '''
+        for i in range(len(mean)):
+            x[i] = np.multiply(x[i], std[i], dtype=np.float32)
+            x[i] = np.add(x[i], mean[i], dtype=np.float32)
+        x = np.swapaxes(x, 0, 2)
+        x = np.swapaxes(x, 0, 1)
+        return x
