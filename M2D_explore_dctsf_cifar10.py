@@ -213,7 +213,7 @@ class Proposed_attack():
 
 
     def manifold_search_2d(self, x_o, x_b,
-                           alpha=0.99,
+                           alpha=0.97,
                            beta=math.pi / 40,
                            beta_min=math.pi / 1000,
                            n=None,
