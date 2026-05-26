@@ -28,8 +28,8 @@ class Proposed_attack():
     def __init__(self, model, src_img, mean, std, lb, ub, dim_reduc_factor=4,
                  tar_img=None, iteration=93, tol=1e-5, attack_method='manifold_search_2d',
                  verbose_control='Yes',
-                 freq_range=(0.0, 0.5),        # ★ SurFree default
-                 tanh_gamma=1.0):              # ★ SurFree default
+                 freq_range=(0.0, 0.5),        
+                 tanh_gamma=1.0):             
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -214,7 +214,7 @@ class Proposed_attack():
 
     def manifold_search_2d(self, x_o, x_b,
                            alpha=0.99,
-                           beta=math.pi / 30,
+                           beta=math.pi / 15,
                            beta_min=math.pi / 1000,
                            n=None,
                            u=None):
