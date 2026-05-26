@@ -13,21 +13,24 @@ import math
 # Differences vs M2D_explore_dct_imagenet.py:
 #     iteration : 1600 → 93         (CIFAR 标准 outer loop 长度)
 #     print     : 每 20 → 每 4 iter (93 iter 短，恢复原频率)
-#     dct_ratio : 1/8 (unchanged)
-#         32×32 image: k = round(32/8) = 4 → 4×4=16 freq/channel
-#         占总频数 16/1024 = 1.56%（和 ImageNet 1/8 同比例）
+#     dct_ratio : 1/8 → 1/4         ★ ratio 调整为 CIFAR 适用
+#         32×32 image: k = round(32/4) = 8 → 8×8=64 freq/channel
+#         占总频数 64/1024 = 6.25%（比 ImageNet 1.6% 宽 4x）
 #
-# 注意:
-#   1. CIFAR (3072 维) 上 plain 已经较好，DCT 改进幅度预期 < 10%
-#      （不像 ImageNet 上 -40% 那么夸张）
-#   2. 如果 dct_ratio=1/8 在 CIFAR 上 ASR 掉（k=4 太小），改成 1/4 (k=8)
+# 实测教训:
+#   ratio=1/8 (k=4, 16 freq/ch, 48 总维) 在 CIFAR 上 median 反而劣化 4x:
+#     preactresnet18: 1.55 vs plain ~0.4
+#     wideresnet40_2: 1.66 vs plain ~0.4
+#     vit:            0.68 vs plain ~0.42
+#   原因: 32×32 上 k=4 总搜索维度仅 48，太少了。
+#   修复: 改 ratio=1/4 (k=8, 64 freq/ch, 192 总维, 比例 6.25%)
 # ============================================================================
 
 
 class Proposed_attack():
     def __init__(self, model, src_img, mean, std, lb, ub, dim_reduc_factor=4,
                  tar_img=None, iteration=93, tol=1e-5, attack_method='manifold_search_2d',  # ★ iter=93
-                 verbose_control='Yes', dct_ratio=1.0/8):
+                 verbose_control='Yes', dct_ratio=1.0/4):    # ★ CIFAR 改 1/4
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
