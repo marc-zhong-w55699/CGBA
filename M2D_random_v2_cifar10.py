@@ -35,7 +35,7 @@ import math
 
 class Proposed_attack():
     def __init__(self, model, src_img, mean, std, lb, ub, dim_reduc_factor=4,
-                 tar_img=None, iteration=250, tol=1e-5, attack_method='manifold_search_2d',
+                 tar_img=None, iteration=1000, tol=1e-5, attack_method='manifold_search_2d',  # ★ iter 250→1000
                  verbose_control='Yes',
                  theta_max=math.pi / 3,           # ★ 60° max search angle
                  BS_iter=7):                       # ★ binary search depth
@@ -276,7 +276,7 @@ class Proposed_attack():
         size = self.src_img.shape
 
         outer_iter = self.iteration
-        inner_n = 15
+        inner_n = 1                            # ★ 15→1: SurFree-style, one big move per outer iter
         lam1, lam2, lam3 = 0, 0, 1            # ★ random (pure noise, no momentum)
 
         u_prev = None
