@@ -59,7 +59,7 @@ class Proposed_attack():
         self.LS_every = LS_every
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.all_queries = 0
+        self.all_queries = 0)
 
 
 
