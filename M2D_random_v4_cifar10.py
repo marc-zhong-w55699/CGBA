@@ -38,7 +38,7 @@ class Proposed_attack():
                  BS_iter=7,
                  LS_probes=5,                   # ★ line search probe count
                  LS_every=1,                    # ★ v4 path A: LS every N outer iters
-        self.model = model
+        self.model = model)
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
         self.tar_img = tar_img
@@ -59,7 +59,7 @@ class Proposed_attack():
         self.LS_every = LS_every
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.all_queries = 0)
+        self.all_queries = 0
 
 
 
