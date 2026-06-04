@@ -7,34 +7,37 @@ import math
 
 
 # ============================================================================
-# CIFAR-10 M2D-random (λ=0,0,1) + v3 geometry + v4 line search.
+# CIFAR-10 M2D-random (λ=0,0,1) + v3 geometry + v4 path A line search.
 # Pure attack class. No DCT.
 #
-# v4 = v3 + line search refinement at init stage.
+# v4 path A = v3 + line search AFTER each outer iter's circular search.
 #
-# Motivation:
-#   Standard bin_search assumes monotonic adv transition along the search line.
-#   When boundary is non-convex (multi-crossing), bin_search converges to the
-#   FARTHEST adversarial boundary point along the line, missing CLOSER ones.
-#   Line search probes n_probes intermediate points to find the FIRST adv
-#   crossing (closest to x_o), then bin_search refines within that interval.
+# (v4 path A) Motivation:
+#   v3's circular search returns x_b_new = Φ(θ*, s) at distance r·cos(θ*).
+#   The radial line (x_o → x_b_new) is a NEW direction NEVER searched by walk,
+#   so it can contain unexplored boundary crossings. LS probes this line
+#   and finds the CLOSEST adv crossing.
 #
-# Two injection points:
-#   1) find_random_adversarial's internal bin_search  →  _line_search_closest
-#   2) Attack()'s init bin_search                     →  _line_search_closest
+# Note: v4 path B (init LS) was tested and proven useless on CIFAR
+#   (walk implicitly does line search → no improvement).
 #
-# Cost per call: ~5 probes + ~7 bin_search = ~12 queries (vs ~17 for plain bin)
-# Expected: -5~10% on init norm → propagates to better final norm
+# Injection point:
+#   After each outer iter's manifold_search_2d, call _line_search_closest
+#   along (x_o → x_adv) direction (every LS_every iterations).
+#
+# Cost per LS call: ~5 probes + ~7 bin_search = ~12 queries
+# Default LS_every=1 (every iter); iteration reduced to compensate cost.
 # ============================================================================
 
 
 class Proposed_attack():
     def __init__(self, model, src_img, mean, std, lb, ub, dim_reduc_factor=4,
-                 tar_img=None, iteration=1000, tol=1e-5, attack_method='manifold_search_2d',
+                 tar_img=None, iteration=500, tol=1e-5, attack_method='manifold_search_2d',  # ★ iter 1000→500 (q/iter ~26 with LS)
                  verbose_control='Yes',
                  theta_max=math.pi / 3,
                  BS_iter=7,
-                 LS_probes=5):                  # ★ v4: line search probes
+                 LS_probes=5,                   # ★ line search probe count
+                 LS_every=1,                    # ★ v4 path A: LS every N outer iters
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -53,6 +56,7 @@ class Proposed_attack():
         self.theta_max = theta_max
         self.BS_iter = BS_iter
         self.LS_probes = LS_probes
+        self.LS_every = LS_every
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.all_queries = 0
@@ -142,8 +146,8 @@ class Proposed_attack():
 
             if is_adv == 1:
                 perturbed = candidate
-                # ★ v4: use line_search instead of bin_search
-                x_b, bin_calls = self._line_search_closest(image, perturbed, max_calls)
+                # ★ v4 path A: revert to plain bin_search (init LS proven useless)
+                x_b, bin_calls = self.bin_search(image, perturbed, max_calls)
                 num_calls += bin_calls
                 return x_b, num_calls
 
@@ -289,8 +293,8 @@ class Proposed_attack():
         if self.tar_img != None:
             x_random, query_random = self.tar_img, 0
 
-        # ★ v4: line_search instead of plain bin_search for extra non-convex robustness
-        x_b, query_b = self._line_search_closest(self.src_img, x_random)
+        # ★ v4 path A: plain bin_search at init (LS moved to post-rotation)
+        x_b, query_b = self.bin_search(self.src_img, x_random)
 
         x_b_inv = self.inv_tf(copy.deepcopy(x_b.cpu()[0,:,:,:].squeeze()), self.mean, self.std)
         norm_initial = torch.norm(x_b_inv - x_inv)
@@ -338,6 +342,13 @@ class Proposed_attack():
             x_adv, qs = self.manifold_search_2d(
                 self.src_img, x_b, u=u_new
             )
+
+            # ★ v4 path A: LS refinement along NEW radial direction (x_o → x_adv)
+            # This direction was never searched by walk; non-convex multi-crossing
+            # may have left a closer adv boundary point hidden along it.
+            if (it + 1) % self.LS_every == 0:
+                x_adv, ls_q = self._line_search_closest(self.src_img, x_adv, max_calls=15)
+                qs += ls_q
 
             x_e_prev = x_adv
             x_b_prev = x_b
