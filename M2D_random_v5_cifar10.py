@@ -7,30 +7,26 @@ import math
 
 
 # ============================================================================
-# CIFAR-10 M2D-random (λ=0,0,1) + v3 geometry + v5 n_ortho Gram-Schmidt.
+# CIFAR-10 M2D-random (λ=0,0,1) + v3 geometry + v5 adaptive theta_max.
 # Pure attack class. No DCT.
 #
-# NOTE: File name retains "v4" for runner compatibility, but content is v5.
-#       v4 line search experiments (init LS, post-rotation LS) were both
-#       proven net-negative on CIFAR (see paper ablation). v5 supersedes.
-#
-# v5 = v3 + n_ortho direction history (Gram-Schmidt against past 100 u).
+# v5 = v3 + adaptive theta_max (replaces the fixed π/3 = 60°).
 #
 # Motivation:
-#   v3's outer loop samples a fresh random u every iter. Across 1000 iters,
-#   many u's are quasi-redundant (highly correlated to past u's), so the
-#   binary search re-explores the same boundary region repeatedly.
-#   SurFree maintains 100 past directions and Gram-Schmidt'es each new u
-#   against them, guaranteeing each search plane is novel.
+#   v3 uses a fixed theta_max = π/3 throughout all 1000 outer iters.
+#     - Early phase (r large): best_θ often near ceiling, OK
+#     - Late phase (r small): best_θ much smaller than theta_max, first
+#       3-4 binary search probes waste on confirming "theta_max too large"
+#   v5 dynamically adjusts theta_max based on observed best_angle:
+#     - If best_angle hits ceiling (> 0.8 × theta_max): EXPAND
+#     - If best_angle is way smaller (< 0.2 × theta_max): SHRINK
+#     - Else: hold
 #
-# Implementation:
-#   Maintain a FIFO buffer of past `n_ortho` unit u directions.
-#   For each new d3 (before λ-combo), subtract projection onto each
-#   historical direction, then renormalize.
+# Bounds: theta_max ∈ [π/60 (3°), π/2 (90°)]
+# Initial: π/3 (60°), same as v3 starting point
 #
-# Cost: 0 extra queries (pure CPU/GPU compute).
-# Memory: n_ortho × image_size floats ≈ 1.2 MB for CIFAR (32×32×3 × 100).
-# Expected: -10~15% norm vs v3 (per SurFree-like analysis).
+# Cost: 0 extra queries (pure arithmetic).
+# Expected: -10~20% wasted queries → -5~10% final norm
 # ============================================================================
 
 
@@ -38,9 +34,12 @@ class Proposed_attack():
     def __init__(self, model, src_img, mean, std, lb, ub, dim_reduc_factor=4,
                  tar_img=None, iteration=1000, tol=1e-5, attack_method='manifold_search_2d',
                  verbose_control='Yes',
-                 theta_max=math.pi / 3,
-                 BS_iter=7,
-                 n_ortho=100):                   # ★ v5: Gram-Schmidt history depth
+                 theta_max=math.pi / 3,          # initial value
+                 theta_min_bound=math.pi / 60,   # ★ v5: theta_max lower bound (3°)
+                 theta_max_bound=math.pi / 2,    # ★ v5: theta_max upper bound (90°)
+                 grow_factor=1.10,               # ★ v5: expand multiplier when at ceiling
+                 shrink_factor=0.85,             # ★ v5: shrink multiplier when too small
+                 BS_iter=7):
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -57,8 +56,11 @@ class Proposed_attack():
         self.attack_method = attack_method
         self.dim_reduc_factor = dim_reduc_factor
         self.theta_max = theta_max
+        self.theta_min_bound = theta_min_bound
+        self.theta_max_bound = theta_max_bound
+        self.grow_factor = grow_factor
+        self.shrink_factor = shrink_factor
         self.BS_iter = BS_iter
-        self.n_ortho = n_ortho
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.all_queries = 0
@@ -144,23 +146,6 @@ class Proposed_attack():
 
 
 
-    def _gram_schmidt_against_history(self, vec, history, eps=1e-8):
-        """★ v5: subtract projection of vec onto each historical direction.
-        history is a list of unit-norm tensors. Returns renormalized result,
-        or None if degenerate."""
-        vec_flat = vec.reshape(-1)
-        for d_hist in history:
-            d_hist_flat = d_hist.reshape(-1)
-            proj_coef = torch.dot(vec_flat, d_hist_flat)
-            vec = vec - proj_coef * d_hist
-            vec_flat = vec.reshape(-1)
-        nrm = torch.norm(vec)
-        if nrm < eps:
-            return None
-        return vec / nrm
-
-
-
     def _circ_x_at(self, x_o, r, v, u, s, theta):
         cos_t, sin_t = math.cos(theta), math.sin(theta)
         return clip_image_values(
@@ -193,8 +178,12 @@ class Proposed_attack():
                            beta=math.pi / 30,
                            beta_min=math.pi / 1000,
                            u=None,
+                           theta_max_cur=None,        # ★ v5: per-iter theta_max
                            **kwargs):
+        """Returns (x_e, num_calls, best_angle) — best_angle is for adaptive update."""
         num_calls = 0
+        # Use override if provided; else fall back to self.theta_max
+        theta_max = theta_max_cur if theta_max_cur is not None else self.theta_max
 
         diff = x_b - x_o
         r = torch.norm(diff)
@@ -211,7 +200,8 @@ class Proposed_attack():
             u_norm = torch.norm(u)
         u = u / u_norm
 
-        probe_angle = self.theta_max / 4.0
+        # Sign search at probe_angle = theta_max/4 (cheap)
+        probe_angle = theta_max / 4.0
         s = 0
         x_pos = self._circ_x_at(x_o, r, v, u, +1, probe_angle)
         num_calls += 1
@@ -223,6 +213,7 @@ class Proposed_attack():
             if self.is_adversarial(x_neg) == 1:
                 s = -1
 
+        # Fallback sign search via halving
         if s == 0:
             cur_beta = beta
             while cur_beta > beta_min:
@@ -238,15 +229,16 @@ class Proposed_attack():
                     break
                 cur_beta = cur_beta / 2
             if s == 0:
-                return x_b, num_calls
+                return x_b, num_calls, 0.0   # ★ best_angle=0 → triggers shrink
 
-        best_angle, x_best, bs_q = self._circ_binary_search(x_o, r, v, u, s, self.theta_max)
+        # Main binary search with adaptive theta_max
+        best_angle, x_best, bs_q = self._circ_binary_search(x_o, r, v, u, s, theta_max)
         num_calls += bs_q
 
         if x_best is not None and best_angle > 0:
-            return x_best, num_calls
+            return x_best, num_calls, best_angle
         else:
-            return x_b, num_calls
+            return x_b, num_calls, 0.0
 
 
 
@@ -282,8 +274,10 @@ class Proposed_attack():
         x_b_prev = None
         x_adv = x_b
 
-        # ★ v5: Gram-Schmidt direction history (FIFO of unit-norm u_new vectors)
-        u_history = []
+        # ★ v5: per-iter theta_max state
+        theta_max_cur = self.theta_max
+        # Tracking for diagnostics
+        theta_history = []
 
         for it in range(outer_iter):
             diff = x_b - self.src_img
@@ -309,22 +303,24 @@ class Proposed_attack():
                 if u_new is None:
                     u_new = d3
 
-            # ★ v5: Gram-Schmidt against historical u's
-            if u_new is not None and len(u_history) > 0:
-                u_orth = self._gram_schmidt_against_history(u_new, u_history)
-                if u_orth is not None:
-                    u_new = u_orth
-                # else: fall back to original u_new (degenerate case)
-
-            x_adv, qs = self.manifold_search_2d(
-                self.src_img, x_b, u=u_new
+            # ★ v5: pass current theta_max
+            x_adv, qs, best_angle = self.manifold_search_2d(
+                self.src_img, x_b, u=u_new, theta_max_cur=theta_max_cur
             )
 
-            # ★ v5: push to history (FIFO)
-            if u_new is not None:
-                u_history.append(u_new.detach().clone())
-                if len(u_history) > self.n_ortho:
-                    u_history.pop(0)
+            # ★ v5: adaptive theta_max update
+            if best_angle > 0:
+                if best_angle > 0.8 * theta_max_cur:
+                    # Hit near ceiling → expand
+                    theta_max_cur = min(theta_max_cur * self.grow_factor, self.theta_max_bound)
+                elif best_angle < 0.2 * theta_max_cur:
+                    # Way too small → shrink
+                    theta_max_cur = max(theta_max_cur * self.shrink_factor, self.theta_min_bound)
+            else:
+                # Sign search failed → shrink (boundary maybe close)
+                theta_max_cur = max(theta_max_cur * self.shrink_factor, self.theta_min_bound)
+
+            theta_history.append(theta_max_cur)
 
             x_e_prev = x_adv
             x_b_prev = x_b
@@ -343,7 +339,8 @@ class Proposed_attack():
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
-                          f'   ortho_n={len(u_history)}')
+                          f'   θ_max={math.degrees(theta_max_cur):.1f}°' +
+                          f'   best_θ={math.degrees(best_angle):.1f}°')
 
             norms.append(norm)
             n_query.append(q_num)
@@ -352,6 +349,12 @@ class Proposed_attack():
         print(f'Gradient estimation queries : {total_grad_queries}')
         print(f'Boundary search queries     : {total_boundary_queries}')
         print(f'Total queries               : {q_num}')
+        if theta_history:
+            print(f'θ_max trajectory: init={math.degrees(theta_history[0]):.1f}°, '
+                  f'final={math.degrees(theta_history[-1]):.1f}°, '
+                  f'mean={math.degrees(np.mean(theta_history)):.1f}°, '
+                  f'min={math.degrees(min(theta_history)):.1f}°, '
+                  f'max={math.degrees(max(theta_history)):.1f}°')
         print(f'────────────────────────────────────────────────')
 
         x_adv = clip_image_values(x_adv, self.lb, self.ub)
