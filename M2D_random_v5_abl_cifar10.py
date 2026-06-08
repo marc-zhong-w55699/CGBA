@@ -35,7 +35,7 @@ class Proposed_attack():
                  tar_img=None, iteration=1000, tol=1e-5, attack_method='manifold_search_2d',
                  verbose_control='Yes',
                  theta_max=math.pi / 3,          # initial value
-                 theta_min_bound=math.pi / 10,   # ★ v5: theta_max lower bound (3°)
+                 theta_min_bound=math.pi / 60,   # ★ v5: theta_max lower bound (3°)
                  theta_max_bound=math.pi / 2,    # ★ v5: theta_max upper bound (90°)
                  grow_factor=1.10,               # ★ v5: expand multiplier when at ceiling
                  shrink_factor=0.85,             # ★ v5: shrink multiplier when too small
@@ -149,7 +149,7 @@ class Proposed_attack():
     def _circ_x_at(self, x_o, r, v, u, s, theta):
         cos_t, sin_t = math.cos(theta), math.sin(theta)
         return clip_image_values(
-            x_o + r * cos_t * (v * cos_t + s * u * sin_t),
+            x_o + r * 0.95 * cos_t * (v * cos_t + s * u * sin_t),
             self.lb, self.ub
         ).to(self.device)
 
