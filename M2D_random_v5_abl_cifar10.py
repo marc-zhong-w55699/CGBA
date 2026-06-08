@@ -39,7 +39,7 @@ class Proposed_attack():
                  theta_max_bound=math.pi / 2,    # ★ v5: theta_max upper bound (90°)
                  grow_factor=1.10,               # ★ v5: expand multiplier when at ceiling
                  shrink_factor=0.85,             # ★ v5: shrink multiplier when too small
-                 BS_iter=8):
+                 BS_iter=7):
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
