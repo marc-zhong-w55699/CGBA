@@ -44,7 +44,7 @@ class Proposed_attack():
                  theta_max=math.pi / 3,          # initial value
                  theta_min_bound=math.pi / 60,  # ★ v5b: lower bound 3° → 1° (avoid floor lock)
                  theta_max_bound=math.pi / 2,    # ★ v5: theta_max upper bound (90°)
-                 grow_factor=1.20,               # ★ v5b: grow 1.10 → 1.20 (more aggressive expansion)
+                 grow_factor=1.15,               # ★ v5b: grow 1.10 → 1.20 (more aggressive expansion)
                  shrink_factor=0.85,             # ★ v5b: shrink 0.85 → 0.95 (much gentler)
                  shrink_thresh=0.15,             # ★ v5b: shrink only when best_θ < 5% × θ_max (was 20%)
                  BS_iter=6):
