@@ -201,7 +201,7 @@ class Proposed_attack():
         u = u / u_norm
 
         # Sign search at probe_angle = theta_max/4 (cheap)
-        probe_angle = theta_max / 4.0
+        probe_angle = theta_max / 8.0
         s = 0
         x_pos = self._circ_x_at(x_o, r, v, u, +1, probe_angle)
         num_calls += 1
