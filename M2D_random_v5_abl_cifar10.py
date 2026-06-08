@@ -35,7 +35,7 @@ class Proposed_attack():
                  tar_img=None, iteration=1000, tol=1e-5, attack_method='manifold_search_2d',
                  verbose_control='Yes',
                  theta_max=math.pi / 4,          # initial value
-                 theta_min_bound=math.pi / 60,   # ★ v5: theta_max lower bound (3°)
+                 theta_min_bound=math.pi / 90,   # ★ v5: theta_max lower bound (3°)
                  theta_max_bound=math.pi / 2,    # ★ v5: theta_max upper bound (90°)
                  grow_factor=1.10,               # ★ v5: expand multiplier when at ceiling
                  shrink_factor=0.85,             # ★ v5: shrink multiplier when too small
