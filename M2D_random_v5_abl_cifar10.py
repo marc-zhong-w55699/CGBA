@@ -149,7 +149,7 @@ class Proposed_attack():
     def _circ_x_at(self, x_o, r, v, u, s, theta):
         cos_t, sin_t = math.cos(theta), math.sin(theta)
         return clip_image_values(
-            x_o + r * 0.95* cos_t * (v * cos_t + s * u * sin_t),
+            x_o + r * 0.99* cos_t * (v * cos_t + s * u * sin_t),
             self.lb, self.ub
         ).to(self.device)
 
