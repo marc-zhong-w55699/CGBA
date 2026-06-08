@@ -22,8 +22,15 @@ import math
 #     - If best_angle is way smaller (< 0.2 × theta_max): SHRINK
 #     - Else: hold
 #
-# Bounds: theta_max ∈ [π/60 (3°), π/2 (90°)]
+# Bounds: theta_max ∈ [π/180 (1°), π/2 (90°)]   ★ v5b: lower bound relaxed
 # Initial: π/3 (60°), same as v3 starting point
+#
+# v5b tuning vs v5 original:
+#   shrink_factor:    0.85 → 0.95  (much gentler shrink)
+#   shrink_thresh:    0.20 → 0.05  (rarer trigger)
+#   grow_factor:      1.10 → 1.20  (more aggressive expansion)
+#   theta_min_bound:  3°   → 1°    (lower floor)
+#   sign-fail shrink: REMOVED      (transient noise, not signal)
 #
 # Cost: 0 extra queries (pure arithmetic).
 # Expected: -10~20% wasted queries → -5~10% final norm
@@ -35,10 +42,11 @@ class Proposed_attack():
                  tar_img=None, iteration=1000, tol=1e-5, attack_method='manifold_search_2d',
                  verbose_control='Yes',
                  theta_max=math.pi / 3,          # initial value
-                 theta_min_bound=math.pi / 60,   # ★ v5: theta_max lower bound (3°)
+                 theta_min_bound=math.pi / 180,  # ★ v5b: lower bound 3° → 1° (avoid floor lock)
                  theta_max_bound=math.pi / 2,    # ★ v5: theta_max upper bound (90°)
-                 grow_factor=1.10,               # ★ v5: expand multiplier when at ceiling
-                 shrink_factor=0.85,             # ★ v5: shrink multiplier when too small
+                 grow_factor=1.20,               # ★ v5b: grow 1.10 → 1.20 (more aggressive expansion)
+                 shrink_factor=0.95,             # ★ v5b: shrink 0.85 → 0.95 (much gentler)
+                 shrink_thresh=0.05,             # ★ v5b: shrink only when best_θ < 5% × θ_max (was 20%)
                  BS_iter=7):
         self.model = model
         self.src_img = src_img
@@ -60,6 +68,7 @@ class Proposed_attack():
         self.theta_max_bound = theta_max_bound
         self.grow_factor = grow_factor
         self.shrink_factor = shrink_factor
+        self.shrink_thresh = shrink_thresh
         self.BS_iter = BS_iter
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -308,17 +317,17 @@ class Proposed_attack():
                 self.src_img, x_b, u=u_new, theta_max_cur=theta_max_cur
             )
 
-            # ★ v5: adaptive theta_max update
+            # ★ v5b: gentler adaptive theta_max update
             if best_angle > 0:
                 if best_angle > 0.8 * theta_max_cur:
-                    # Hit near ceiling → expand
+                    # Hit near ceiling → expand (more aggressive: ×1.20)
                     theta_max_cur = min(theta_max_cur * self.grow_factor, self.theta_max_bound)
-                elif best_angle < 0.2 * theta_max_cur:
-                    # Way too small → shrink
+                elif best_angle < self.shrink_thresh * theta_max_cur:
+                    # Way too small (< 5% × θ_max) → gentle shrink (×0.95)
                     theta_max_cur = max(theta_max_cur * self.shrink_factor, self.theta_min_bound)
-            else:
-                # Sign search failed → shrink (boundary maybe close)
-                theta_max_cur = max(theta_max_cur * self.shrink_factor, self.theta_min_bound)
+                # else: hold (intermediate is fine, don't perturb)
+            # ★ v5b: removed sign-fail shrink (was too aggressive)
+            # Sign search failures are often transient noise, not a signal to shrink permanently
 
             theta_history.append(theta_max_cur)
 
