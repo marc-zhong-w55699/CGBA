@@ -47,7 +47,7 @@ class Proposed_attack():
                  grow_factor=1.20,               # ★ v5b: grow 1.10 → 1.20 (more aggressive expansion)
                  shrink_factor=0.85,             # ★ v5b: shrink 0.85 → 0.95 (much gentler)
                  shrink_thresh=0.15,             # ★ v5b: shrink only when best_θ < 5% × θ_max (was 20%)
-                 BS_iter=7):
+                 BS_iter=6):
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
