@@ -42,7 +42,7 @@ class Proposed_attack():
                  tar_img=None, iteration=1000, tol=1e-5, attack_method='manifold_search_2d',
                  verbose_control='Yes',
                  theta_max=math.pi / 3,          # initial value
-                 theta_min_bound=math.pi / 180,  # ★ v5b: lower bound 3° → 1° (avoid floor lock)
+                 theta_min_bound=math.pi / 60,  # ★ v5b: lower bound 3° → 1° (avoid floor lock)
                  theta_max_bound=math.pi / 2,    # ★ v5: theta_max upper bound (90°)
                  grow_factor=1.10,               # ★ v5b: grow 1.10 → 1.20 (more aggressive expansion)
                  shrink_factor=0.8,             # ★ v5b: shrink 0.85 → 0.95 (much gentler)
