@@ -7,30 +7,31 @@ import math
 
 
 # ============================================================================
-# CIFAR-10 M2D-explore (λ=0.2,0.2,0.6) + v3 geometry + v5b adaptive theta_max.
+# CIFAR-10 M2D-state (state machine: EXPLOIT/EXPLORE/REFINE)
+#                  + v3 geometry + v5b adaptive theta_max.
 # Pure attack class. No DCT.
 #
-# v5b key insight (vs v5 original):
-#   The dominant cost in v3 is the BS_iter=7 binary search, but best_θ is
-#   usually 1-3° anyway — 7 BS probes are overkill (~0.15° precision).
-#   Setting BS_iter=3 (~0.6° precision) saves ~4 q/iter, enabling
-#   2.3× more outer iter at the same query budget → much lower final norm.
+# State machine (from state_v3):
+#   STATE_EXPLOIT: λ = (0.4, 0.3, 0.3)   — push progress when delta > eps
+#   STATE_EXPLORE: λ = (0.2, 0.2, 0.6)   — diversify when stagnating
+#   STATE_REFINE : λ = (0.3, 0.5, 0.2)   — momentum-heavy when r is small
+#   Transitions (after MIN_DWELL iters):
+#     - r_ratio < R_REFINE_RATIO        → REFINE
+#     - stag_k >= STAG_THRESH           → EXPLORE
+#     - delta_rel > EPS_PROGRESS        → EXPLOIT
 #
-# v5b tuning vs v5 original:
-#   BS_iter:          7    → 3       ★ KEY: re-invest precision → more outer iter
-#   shrink_factor:    0.85 → 0.85    (kept)
-#   shrink_thresh:    0.20 → 0.15    (rarer trigger)
-#   grow_factor:      1.10 → 1.15    (slightly more aggressive expansion)
-#   theta_min_bound:  3°               (kept)
-#   sign-fail shrink: REMOVED         (transient noise, not signal)
+# v5b key insight (same as random/explore/exploit/refine v5):
+#   BS_iter 7 → 3 saves ~4 q/iter, enabling 2.3× more outer iter at the
+#   same query budget. Adaptive theta_max shrinks when best_θ << ceiling.
 #
-# Adaptive theta_max logic:
-#   - If best_angle > 0.8 × theta_max:        EXPAND (×grow_factor)
-#   - If best_angle < shrink_thresh × theta_max: SHRINK (×shrink_factor)
-#   - Else:                                    HOLD
-#
-# Bounds: theta_max ∈ [π/60 (3°), π/2 (90°)]
-# Initial: π/3 (60°), same as v3 starting point
+# v5b params:
+#   BS_iter         = 3
+#   grow_factor     = 1.15
+#   shrink_factor   = 0.85
+#   shrink_thresh   = 0.15
+#   theta_min_bound = π/60 (3°)
+#   theta_max_bound = π/2  (90°)
+#   No sign-fail shrink.
 # ============================================================================
 
 
@@ -38,13 +39,13 @@ class Proposed_attack():
     def __init__(self, model, src_img, mean, std, lb, ub, dim_reduc_factor=4,
                  tar_img=None, iteration=1000, tol=1e-5, attack_method='manifold_search_2d',
                  verbose_control='Yes',
-                 theta_max=math.pi / 3,          # initial value
-                 theta_min_bound=math.pi / 60,   # ★ v5: theta_max lower bound (3°)
-                 theta_max_bound=math.pi / 2,    # ★ v5: theta_max upper bound (90°)
-                 grow_factor=1.15,               # ★ v5b: expand multiplier (1.10 → 1.15)
-                 shrink_factor=0.85,             # ★ v5: shrink multiplier when too small
-                 shrink_thresh=0.15,             # ★ v5b: shrink only when best_θ < 15% × θ_max
-                 BS_iter=3):                     # ★ v5b KEY: 7 → 3 (re-invest into more outer iter)
+                 theta_max=math.pi / 3,
+                 theta_min_bound=math.pi / 60,
+                 theta_max_bound=math.pi / 2,
+                 grow_factor=1.15,
+                 shrink_factor=0.85,
+                 shrink_thresh=0.15,
+                 BS_iter=3):
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -184,11 +185,10 @@ class Proposed_attack():
                            beta=math.pi / 30,
                            beta_min=math.pi / 1000,
                            u=None,
-                           theta_max_cur=None,        # ★ v5: per-iter theta_max
+                           theta_max_cur=None,
                            **kwargs):
         """Returns (x_e, num_calls, best_angle) — best_angle is for adaptive update."""
         num_calls = 0
-        # Use override if provided; else fall back to self.theta_max
         theta_max = theta_max_cur if theta_max_cur is not None else self.theta_max
 
         diff = x_b - x_o
@@ -235,9 +235,8 @@ class Proposed_attack():
                     break
                 cur_beta = cur_beta / 2
             if s == 0:
-                return x_b, num_calls, 0.0   # ★ best_angle=0 → triggers shrink
+                return x_b, num_calls, 0.0
 
-        # Main binary search with adaptive theta_max
         best_angle, x_best, bs_q = self._circ_binary_search(x_o, r, v, u, s, theta_max)
         num_calls += bs_q
 
@@ -272,8 +271,27 @@ class Proposed_attack():
         n_query.append(q_num)
         size = self.src_img.shape
 
+        # ★ State machine config (same as state_v3)
+        STATE_EXPLOIT = 'EXPLOIT'
+        STATE_EXPLORE = 'EXPLORE'
+        STATE_REFINE  = 'REFINE'
+        STATE_WEIGHTS = {
+            STATE_EXPLOIT: (0.4, 0.3, 0.3),
+            STATE_EXPLORE: (0.2, 0.2, 0.6),
+            STATE_REFINE:  (0.3, 0.5, 0.2),
+        }
+        EPS_PROGRESS   = 0.005
+        STAG_THRESH    = 5
+        R_REFINE_RATIO = 0.15
+        MIN_DWELL      = 2
+
         outer_iter = self.iteration
-        lam1, lam2, lam3 = 0.2, 0.2, 0.6      # ★ explore
+
+        state  = STATE_EXPLOIT
+        stag_k = 0
+        dwell  = 0
+        r_init = float(torch.norm(x_b - self.src_img).item())
+        r_prev = r_init
 
         u_prev = None
         x_e_prev = None
@@ -282,7 +300,6 @@ class Proposed_attack():
 
         # ★ v5: per-iter theta_max state
         theta_max_cur = self.theta_max
-        # Tracking for diagnostics
         theta_history = []
 
         for it in range(outer_iter):
@@ -291,6 +308,31 @@ class Proposed_attack():
             if r_cur < 1e-8:
                 break
             v_new = diff / r_cur
+
+            # ★ State machine update
+            r_now     = float(r_cur.item())
+            delta_rel = (r_prev - r_now) / max(r_prev, 1e-12)
+            r_ratio   = r_now / max(r_init, 1e-12)
+            if delta_rel < EPS_PROGRESS:
+                stag_k += 1
+            else:
+                stag_k = 0
+
+            dwell += 1
+            if dwell >= MIN_DWELL:
+                if r_ratio < R_REFINE_RATIO:
+                    new_state = STATE_REFINE
+                elif stag_k >= STAG_THRESH:
+                    new_state = STATE_EXPLORE
+                elif delta_rel > EPS_PROGRESS:
+                    new_state = STATE_EXPLOIT
+                else:
+                    new_state = state
+                if new_state != state:
+                    state  = new_state
+                    dwell  = 0
+                    stag_k = 0
+            lam1, lam2, lam3 = STATE_WEIGHTS[state]
 
             d1 = self._proj_and_normalize(x_e_prev - x_b_prev, v_new) \
                  if (x_e_prev is not None and x_b_prev is not None) else None
@@ -317,13 +359,11 @@ class Proposed_attack():
             # ★ v5b: adaptive theta_max update (no sign-fail shrink)
             if best_angle > 0:
                 if best_angle > 0.8 * theta_max_cur:
-                    # Hit near ceiling → expand
                     theta_max_cur = min(theta_max_cur * self.grow_factor, self.theta_max_bound)
                 elif best_angle < self.shrink_thresh * theta_max_cur:
-                    # Way too small → shrink
                     theta_max_cur = max(theta_max_cur * self.shrink_factor, self.theta_min_bound)
-                # else: hold (intermediate is fine, don't perturb)
-            # ★ v5b: removed sign-fail shrink (was too aggressive; sign-fail is often transient noise)
+                # else: hold
+            # ★ v5b: removed sign-fail shrink
 
             theta_history.append(theta_max_cur)
 
@@ -340,12 +380,15 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v5-explore iter -> ' + str(it) +
+                    print('Manifold2D-v5-state iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
+                          f'   state={state}' +
                           f'   θ_max={math.degrees(theta_max_cur):.1f}°' +
                           f'   best_θ={math.degrees(best_angle):.1f}°')
+
+            r_prev = r_now
 
             norms.append(norm)
             n_query.append(q_num)

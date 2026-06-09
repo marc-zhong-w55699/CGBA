@@ -7,7 +7,7 @@ import math
 
 
 # ============================================================================
-# CIFAR-10 M2D-explore (λ=0.2,0.2,0.6) + v3 geometry + v5b adaptive theta_max.
+# CIFAR-10 M2D-refine (λ=0.3,0.5,0.2) + v3 geometry + v5b adaptive theta_max.
 # Pure attack class. No DCT.
 #
 # v5b key insight (vs v5 original):
@@ -18,16 +18,16 @@ import math
 #
 # v5b tuning vs v5 original:
 #   BS_iter:          7    → 3       ★ KEY: re-invest precision → more outer iter
-#   shrink_factor:    0.85 → 0.85    (kept)
+#   shrink_factor:    0.85           (kept)
 #   shrink_thresh:    0.20 → 0.15    (rarer trigger)
 #   grow_factor:      1.10 → 1.15    (slightly more aggressive expansion)
-#   theta_min_bound:  3°               (kept)
-#   sign-fail shrink: REMOVED         (transient noise, not signal)
+#   theta_min_bound:  3°              (kept)
+#   sign-fail shrink: REMOVED        (transient noise, not signal)
 #
 # Adaptive theta_max logic:
-#   - If best_angle > 0.8 × theta_max:        EXPAND (×grow_factor)
+#   - If best_angle > 0.8 × theta_max:           EXPAND (×grow_factor)
 #   - If best_angle < shrink_thresh × theta_max: SHRINK (×shrink_factor)
-#   - Else:                                    HOLD
+#   - Else:                                       HOLD
 #
 # Bounds: theta_max ∈ [π/60 (3°), π/2 (90°)]
 # Initial: π/3 (60°), same as v3 starting point
@@ -273,7 +273,7 @@ class Proposed_attack():
         size = self.src_img.shape
 
         outer_iter = self.iteration
-        lam1, lam2, lam3 = 0.2, 0.2, 0.6      # ★ explore
+        lam1, lam2, lam3 = 0.3, 0.5, 0.2      # ★ refine
 
         u_prev = None
         x_e_prev = None
@@ -340,7 +340,7 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v5-explore iter -> ' + str(it) +
+                    print('Manifold2D-v5-refine iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
