@@ -7,26 +7,26 @@ import math
 
 
 # ============================================================================
-# CIFAR-10 M2D-explore (λ=0.2,0.2,0.6) + v5b adaptive theta_max + v6 stuck escape.
+# CIFAR-10 M2D-explore (λ=0.2,0.2,0.6) + v5b adaptive theta_max + v6.1 escape.
 # Pure attack class. No DCT.
 #
 # v6 KEY ADDITION (vs v5):
-#   When 2D circular gets "stuck" in local region (norm shrink rate drops
-#   below threshold over a sliding window), trigger a FORCED RADIAL RESET:
-#     - Pick a chosen radius γ·r (γ < 1, e.g., 0.99) and a swing angle φ
-#       (e.g., φ = arccos(γ)) decoupled from boundary auto-shrink
-#     - Verify candidate point x_o + γr·(cos(φ)·v + s·sin(φ)·u) is adv
-#       (2 queries max for ±s)
+#   When 2D circular gets "stuck" in local region, trigger FORCED RADIAL RESET:
+#     - Pick radius γ·r and swing angle φ=arccos(γ), decoupled from cos(θ) cap
+#     - Try K fresh u proposals × ±s at this (radius, angle); accept first hit
 #     - On success: jump x_b deeper into adv interior, reset θ_max to π/3
-#       to give adaptive a chance to re-expand
 #     - On failure: cooldown a few iters, continue 2D
+#
+# v6.1 changes (tuned from first ViT run):
+#   shrink_thresh: 0.995 → 0.99    (more permissive trigger, 70% no-trigger → fixed)
+#   gamma:         0.99  → 0.995   (softer shrink to lift success rate from 0%)
+#   K_u:           1     → 3       (multi-direction fallback)
 #
 # Stuck detection (sliding window):
 #     stuck := norm[-1] / norm[-W] > shrink_thresh
-#   where W = 30, shrink_thresh = 0.995 (less than 0.5% shrink over 30 iters)
+#   where W = 30, shrink_thresh = 0.99 (less than 1% shrink over 30 iters)
 #
-# Cost: 0-2 queries per stuck-trigger (much cheaper than restarting 2D)
-# Expected: -10~25% final norm on stuck-prone images (CIFAR ViT especially)
+# Cost per attempt: 1-6 queries (was 1-2 in v6.0)
 # ============================================================================
 
 
@@ -43,11 +43,12 @@ class Proposed_attack():
                  BS_iter=3,
                  # ★ v6 escape params
                  escape_window=30,            # W: norm sliding window size
-                 escape_shrink_thresh=0.995,  # norm[-1]/norm[-W] > this → stuck
+                 escape_shrink_thresh=0.99,   # ★ v6.1: 0.995 → 0.99 (more permissive trigger)
                  escape_cooldown=10,          # iters to wait after each trigger
-                 escape_gamma=0.99,           # forced radius factor (target shrink)
-                 escape_phi=None,             # swing angle; None → arccos(gamma)
-                 escape_warmup=100):          # don't trigger before this iter
+                 escape_gamma=0.995,          # ★ v6.1: 0.99 → 0.995 (softer shrink, more likely to succeed)
+                 escape_phi=None,             # swing angle; None → arccos(gamma) ≈ 5.7° at γ=0.995
+                 escape_warmup=100,           # don't trigger before this iter
+                 escape_K_u=3):               # ★ v6.1: try K fresh u proposals per attempt (was 1)
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -78,6 +79,7 @@ class Proposed_attack():
         self.escape_gamma = escape_gamma
         self.escape_phi = escape_phi if escape_phi is not None else math.acos(escape_gamma)
         self.escape_warmup = escape_warmup
+        self.escape_K_u = escape_K_u   # ★ v6.1
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.all_queries = 0
@@ -256,21 +258,24 @@ class Proposed_attack():
 
 
     # ============================================================================
-    # ★ v6 KEY: forced radial reset
+    # ★ v6 KEY: forced radial reset (v6.1: K fresh u proposals)
     # ============================================================================
     def _forced_radial_reset(self, x_o, x_b, u_hint):
         """
-        Stuck escape: pick a target radius gamma*r and swing angle phi,
-        verify if x_o + gamma*r * (cos(phi)*v + s*sin(phi)*u) is adversarial.
-        Returns (x_new, num_queries, success).
+        Stuck escape: try K direction proposals at fixed radius gamma*r,
+        swing angle phi. Returns (x_new, num_queries, success).
 
-        u_hint: current u proposal (will be projected ⊥ v and normalized).
-                Note: per analysis (random variant already diverse, stuck
-                signature direction-agnostic), the choice of u here matters
-                less than the gamma/phi commitment.
+        Strategy (v6.1):
+          1st u: u_hint (whatever current proposal is)
+          2nd..K u: fresh random Gaussian, projected ⊥ v
+
+        For each u, verify s=+1 then s=-1 (2 queries each).
+        Accept first successful candidate, return immediately.
+        Worst-case cost: 2*K queries; typical: 1-3.
         """
         gamma = self.escape_gamma
         phi = self.escape_phi
+        K = self.escape_K_u
 
         diff = x_b - x_o
         r = torch.norm(diff)
@@ -278,39 +283,44 @@ class Proposed_attack():
             return x_b, 0, False
         v = diff / r
 
-        # Project u_hint onto v's orthogonal complement
-        u = u_hint - torch.dot(u_hint.reshape(-1), v.reshape(-1)) * v
-        u_norm = torch.norm(u)
-        if u_norm < 1e-8:
-            # Resample if u_hint collapses
-            u = torch.randn(x_o.shape).to(self.device)
-            u = u - torch.dot(u.reshape(-1), v.reshape(-1)) * v
-            u_norm = torch.norm(u)
-        u = u / u_norm
-
         cos_p = math.cos(phi)
         sin_p = math.sin(phi)
         num_q = 0
 
-        # Try s = +1
-        x_cand = clip_image_values(
-            x_o + gamma * r * (v * cos_p + u * sin_p),
-            self.lb, self.ub
-        ).to(self.device)
-        num_q += 1
-        if self.is_adversarial(x_cand) == 1:
-            return x_cand, num_q, True
+        for k in range(K):
+            # Pick u proposal
+            if k == 0:
+                u_raw = u_hint
+            else:
+                u_raw = torch.randn(x_o.shape).to(self.device)
 
-        # Try s = -1
-        x_cand = clip_image_values(
-            x_o + gamma * r * (v * cos_p - u * sin_p),
-            self.lb, self.ub
-        ).to(self.device)
-        num_q += 1
-        if self.is_adversarial(x_cand) == 1:
-            return x_cand, num_q, True
+            # Project ⊥ v and normalize
+            u = u_raw - torch.dot(u_raw.reshape(-1), v.reshape(-1)) * v
+            u_norm = torch.norm(u)
+            if u_norm < 1e-8:
+                # u collapsed; try fresh random next time
+                continue
+            u = u / u_norm
 
-        # Both failed
+            # Try s = +1
+            x_cand = clip_image_values(
+                x_o + gamma * r * (v * cos_p + u * sin_p),
+                self.lb, self.ub
+            ).to(self.device)
+            num_q += 1
+            if self.is_adversarial(x_cand) == 1:
+                return x_cand, num_q, True
+
+            # Try s = -1
+            x_cand = clip_image_values(
+                x_o + gamma * r * (v * cos_p - u * sin_p),
+                self.lb, self.ub
+            ).to(self.device)
+            num_q += 1
+            if self.is_adversarial(x_cand) == 1:
+                return x_cand, num_q, True
+
+        # All K proposals failed
         return x_b, num_q, False
 
 
@@ -456,7 +466,7 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1 or escape_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v6-explore iter -> ' + str(it) +
+                    print('Manifold2D-v6.1-explore iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
