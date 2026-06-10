@@ -50,7 +50,7 @@ class Proposed_attack():
                  BS_iter=3,
                  # ★ v6.4 floor bounce params
                  bump_floor_streak=10,        # bump θ_max after this many consecutive floor iters
-                 bump_target=math.pi / 36,      # value to bump to; π/6 = 30° (conservative, vs initial π/3)
+                 bump_target=math.pi / 90,      # value to bump to; π/6 = 30° (conservative, vs initial π/3)
                  bump_warmup=100,              # earliest iter to allow bump
                  bump_max_per_image=50):       # safety cap on number of bumps per image
         self.model = model
