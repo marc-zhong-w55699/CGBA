@@ -8,31 +8,34 @@ import math
 
 # ============================================================================
 # CIFAR-10 M2D-explore (λ=0.2,0.2,0.6) + v5b adaptive theta_max
-#                                       + v6 RayS-like escape
+#                                       + v6.3 1D-ray escape
 # Pure attack class. No DCT.
 #
-# v6 KEY: when 2D circular is genuinely stuck (signfail_streak AND floor_streak
-# both ≥ 5), launch a RayS-like escape — K fresh random u proposals, each
-# tries forced-shrink to radius γr at swing angle φ=arccos(γ). No bin-search
-# (saves 5-7 q/ray); accept first adv hit.
+# v6.3 KEY: when 2D is genuinely stuck (≥2 floor-entry events in last 1000
+# queries), launch a 1D-RAY escape:
+#   1. Keep current radius r unchanged
+#   2. Sample fresh random direction d ∈ R^n (entire ambient space, NOT
+#      projected onto the 2D plane)
+#   3. Probe x_o + r·d: if adversarial, run bin_search(x_o, x_o+r·d, n=10)
+#      to find a tighter boundary point at some r' ≤ r
+#   4. If not adversarial, try next random direction (up to K_dir)
 #
-# Differences vs v6.0/v6.1:
-#   * Trigger uses STREAK conditions (not norm-window), so fires only when 2D
-#     has truly produced zero progress for several consecutive iters
-#   * Post-escape θ_max ← escape_phi (NOT π/3) to avoid the "trap" bug where
-#     reset to 60° caused immediate sign-fail in narrow adv pockets
-#   * Total escape attempts capped per image to prevent query-budget runaway
+# Post-escape:
+#   * x_b = bin_search result (on actual boundary, not interior pocket)
+#   * θ_max ← initial / 2 = π/6 (= 30°) to give 2D a meaningful restart range
+#   * Clear u_prev / x_e_prev (stale after direction change)
 #
-# Stuck detection (v6.2):
-#     stuck := floor_streak ≥ 5
-#   where
-#     floor_streak += 1 if θ_max_cur ≤ 1.1 × theta_min_bound else 0
+# Trigger detail:
+#   * Track query-counts at each floor ENTRY (transition from > floor to ≤
+#     floor), trim to last 1000 queries
+#   * Trigger when ≥ 2 entries remain in the window
+#   * Cooldown=30, max_attempts=8 per image
 #
-# Note: original v6 also required signfail_streak ≥ 5, but empirical max
-# signfail_streak across whole runs was only 3 — sign-fails never persist
-# because next iter samples fresh u. Floor_streak is the reliable signal.
-#
-# Cost per attempt: 1 to 2*K queries (typical 1-3)
+# Differences vs v6.0-v6.2:
+#   * Random direction is in FULL R^n (not perp-to-v in 2D plane)
+#   * Uses bin_search (cost ~10q on success) → finds REAL boundary
+#   * No γ shrink factor — radius reduction comes from bin_search, not forced
+#   * Trigger counts floor-entry events, not streaks
 # ============================================================================
 
 
@@ -47,15 +50,15 @@ class Proposed_attack():
                  shrink_factor=0.85,
                  shrink_thresh=0.15,
                  BS_iter=3,
-                 # ★ v6 escape params
-                 escape_signfail_streak=0,    # ★ v6.2: disabled (max obs sfs=3, never reaches 5)
-                 escape_floor_streak=5,        # ★ v6.2: now the ONLY trigger condition
-                 escape_gamma=0.995,           # forced radius factor
-                 escape_phi=None,              # swing angle; None → arccos(gamma) ≈ 5.7°
-                 escape_K_u=5,                 # fresh u proposals per attempt
-                 escape_cooldown=30,           # iters before re-arming after trigger
-                 escape_max_attempts=8,        # hard cap per image
-                 escape_warmup=100):           # earliest iter to allow trigger
+                 # ★ v6.3 escape params
+                 escape_floor_events=2,        # ≥ this many floor entries in window → trigger
+                 escape_window_queries=1000,   # sliding window over query budget
+                 escape_K_dir=5,                # try up to this many random directions per attempt
+                 escape_bs_iter=10,             # bin_search depth on success
+                 escape_cooldown=30,
+                 escape_max_attempts=8,
+                 escape_warmup=100,
+                 escape_theta_reset=None):      # None → theta_max / 2
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -79,15 +82,17 @@ class Proposed_attack():
         self.shrink_thresh = shrink_thresh
         self.BS_iter = BS_iter
 
-        # ★ v6 escape
-        self.escape_signfail_streak = escape_signfail_streak
-        self.escape_floor_streak    = escape_floor_streak
-        self.escape_gamma           = escape_gamma
-        self.escape_phi             = escape_phi if escape_phi is not None else math.acos(escape_gamma)
-        self.escape_K_u             = escape_K_u
-        self.escape_cooldown        = escape_cooldown
-        self.escape_max_attempts    = escape_max_attempts
-        self.escape_warmup          = escape_warmup
+        # ★ v6.3 escape
+        self.escape_floor_events   = escape_floor_events
+        self.escape_window_queries = escape_window_queries
+        self.escape_K_dir          = escape_K_dir
+        self.escape_bs_iter        = escape_bs_iter
+        self.escape_cooldown       = escape_cooldown
+        self.escape_max_attempts   = escape_max_attempts
+        self.escape_warmup         = escape_warmup
+        self.escape_theta_reset    = (escape_theta_reset
+                                      if escape_theta_reset is not None
+                                      else theta_max / 2.0)
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.all_queries = 0
@@ -266,58 +271,41 @@ class Proposed_attack():
 
 
     # ============================================================================
-    # ★ v6 RayS-like escape: K fresh u × forced shrink (no bin-search)
+    # ★ v6.3 1D-ray escape: sample random direction in R^n, probe at radius r,
+    #                       if adv → bin_search; if not adv → next direction.
     # ============================================================================
-    def _rays_like_escape(self, x_o, x_b):
+    def _ray_escape(self, x_o, x_b):
         """
-        Stuck escape: try K fresh u proposals; for each, verify if
-        x_o + γr*(cos(φ)*v + s*sin(φ)*u) is adversarial. Accept first hit.
-
         Returns (x_new, num_queries, success).
-        Worst-case 2*K queries (each u tries ±s); typical 1-3.
-        """
-        gamma = self.escape_gamma
-        phi = self.escape_phi
-        K = self.escape_K_u
 
-        diff = x_b - x_o
-        r = torch.norm(diff)
+        Cost: 1 to K_dir queries on probe phase + escape_bs_iter on success.
+        Worst case (all probes fail): K_dir queries.
+        Typical success case: ~3 probes + bs_iter ≈ 13 queries.
+        """
+        r = torch.norm(x_b - x_o)
         if r < 1e-8:
             return x_b, 0, False
-        v = diff / r
 
-        cos_p = math.cos(phi)
-        sin_p = math.sin(phi)
         num_q = 0
-
-        for k in range(K):
-            # All K proposals are fresh random (no u_hint — stuck means current
-            # direction is bad, so re-roll completely).
-            u_raw = torch.randn(x_o.shape).to(self.device)
-            u = u_raw - torch.dot(u_raw.reshape(-1), v.reshape(-1)) * v
-            u_norm = torch.norm(u)
-            if u_norm < 1e-8:
+        for k in range(self.escape_K_dir):
+            # Fresh random unit vector in the AMBIENT space (no projection)
+            d_raw = torch.randn(x_o.shape).to(self.device)
+            d_norm = torch.norm(d_raw)
+            if d_norm < 1e-8:
                 continue
-            u = u / u_norm
+            d = d_raw / d_norm
 
-            # Try s = +1
-            x_cand = clip_image_values(
-                x_o + gamma * r * (v * cos_p + u * sin_p),
-                self.lb, self.ub
-            ).to(self.device)
+            # Probe at x_o + r·d (same radius as current x_b)
+            x_test = clip_image_values(x_o + r * d, self.lb, self.ub).to(self.device)
             num_q += 1
-            if self.is_adversarial(x_cand) == 1:
-                return x_cand, num_q, True
+            if self.is_adversarial(x_test) == 1:
+                # Found adversarial at same radius in new direction
+                # bin_search from x_o (non-adv) to x_test (adv) to find tighter boundary
+                x_b_new, bs_calls = self.bin_search(x_o, x_test, max_calls=self.escape_bs_iter)
+                num_q += bs_calls
+                return x_b_new, num_q, True
 
-            # Try s = -1
-            x_cand = clip_image_values(
-                x_o + gamma * r * (v * cos_p - u * sin_p),
-                self.lb, self.ub
-            ).to(self.device)
-            num_q += 1
-            if self.is_adversarial(x_cand) == 1:
-                return x_cand, num_q, True
-
+        # All K_dir directions failed
         return x_b, num_q, False
 
 
@@ -355,14 +343,14 @@ class Proposed_attack():
         x_b_prev = None
         x_adv = x_b
 
-        # v5 adaptive theta_max state
+        # v5 adaptive theta_max
         theta_max_cur = self.theta_max
         theta_history = []
 
-        # ★ v6 escape state
-        signfail_streak = 0
-        floor_streak    = 0
-        cooldown        = 0
+        # ★ v6.3 escape state
+        floor_entry_qs = []   # query counts at floor-entry events
+        was_at_floor   = False
+        cooldown       = 0
         escape_attempts = 0
         escape_success  = 0
 
@@ -394,7 +382,7 @@ class Proposed_attack():
                 self.src_img, x_b, u=u_new, theta_max_cur=theta_max_cur
             )
 
-            # v5b adaptive theta_max update
+            # v5b adaptive theta_max
             if best_angle > 0:
                 if best_angle > 0.8 * theta_max_cur:
                     theta_max_cur = min(theta_max_cur * self.grow_factor, self.theta_max_bound)
@@ -415,30 +403,27 @@ class Proposed_attack():
             norm = torch.norm(x_inv - x_adv_inv)
 
             # ============================================================
-            # ★ v6: streak tracking + RayS-like escape
+            # ★ v6.3: floor-entry tracking + 1D-ray escape
             # ============================================================
-            # Update streaks
-            if best_angle == 0:
-                signfail_streak += 1
-            else:
-                signfail_streak = 0
-            if theta_max_cur <= 1.1 * self.theta_min_bound:
-                floor_streak += 1
-            else:
-                floor_streak = 0
+            is_at_floor = theta_max_cur <= 1.1 * self.theta_min_bound
+            if is_at_floor and not was_at_floor:
+                # New floor-entry event
+                floor_entry_qs.append(q_num)
+            was_at_floor = is_at_floor
+
+            # Trim window to last `escape_window_queries` queries
+            while floor_entry_qs and (q_num - floor_entry_qs[0]) > self.escape_window_queries:
+                floor_entry_qs.pop(0)
 
             escape_log = ''
-            # ★ v6.2: trigger purely on floor_streak (sfs condition skipped if thresh=0)
-            sfs_ok = (self.escape_signfail_streak == 0) or (signfail_streak >= self.escape_signfail_streak)
-            fls_ok = (floor_streak >= self.escape_floor_streak)
             if (it >= self.escape_warmup
                 and cooldown == 0
                 and escape_attempts < self.escape_max_attempts
-                and sfs_ok and fls_ok):
+                and len(floor_entry_qs) >= self.escape_floor_events):
 
-                # Trigger RayS-like escape
+                # Trigger 1D-ray escape
                 escape_attempts += 1
-                x_new, qs_esc, success = self._rays_like_escape(self.src_img, x_b)
+                x_new, qs_esc, success = self._ray_escape(self.src_img, x_b)
                 q_num += qs_esc
                 total_escape_queries += qs_esc
 
@@ -448,20 +433,19 @@ class Proposed_attack():
                     new_norm = torch.norm(x_inv - x_new_inv)
                     x_b = x_new
                     x_adv = x_new
+                    # update norm (escape might have moved x_b to lower r)
                     norm = new_norm
-                    # ★ KEY FIX vs v6.1: reset θ_max to escape_phi, NOT π/3
-                    # (avoids the "60° probe lands outside narrow finger" trap)
-                    theta_max_cur = self.escape_phi
-                    # Clear momentum (stale after jump)
+                    # Reset adaptive theta_max to half-initial
+                    theta_max_cur = self.escape_theta_reset
+                    # Clear stale momentum/progress
                     u_prev = None
                     x_e_prev = None
                     x_b_prev = None
-                    # Reset streaks (give 2D a fresh chance)
-                    signfail_streak = 0
-                    floor_streak    = 0
+                    # Clear floor-entry queue so we don't immediately re-trigger
+                    floor_entry_qs = []
                     escape_log = (f'  [ESCAPE✓ #{escape_attempts}/{self.escape_max_attempts} '
                                   f'q={qs_esc} r→{float(new_norm.item()):.3f} '
-                                  f'θ_max→{math.degrees(self.escape_phi):.1f}°]')
+                                  f'θ_max→{math.degrees(self.escape_theta_reset):.1f}°]')
                 else:
                     escape_log = (f'  [ESCAPE✗ #{escape_attempts}/{self.escape_max_attempts} '
                                   f'q={qs_esc}]')
@@ -472,13 +456,13 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1 or escape_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v6.2-explore-rays iter -> ' + str(it) +
+                    print('Manifold2D-v6.3-explore-rayBS iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
                           f'   θ_max={math.degrees(theta_max_cur):.1f}°' +
                           f'   best_θ={math.degrees(best_angle):.1f}°' +
-                          f'   sfs={signfail_streak} fls={floor_streak}' +
+                          f'   flr_evts={len(floor_entry_qs)}' +
                           escape_log)
 
             norms.append(norm)
