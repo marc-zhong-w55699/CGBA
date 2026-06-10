@@ -23,11 +23,14 @@ import math
 #     reset to 60° caused immediate sign-fail in narrow adv pockets
 #   * Total escape attempts capped per image to prevent query-budget runaway
 #
-# Stuck detection:
-#     stuck := (signfail_streak ≥ 5) AND (floor_streak ≥ 5)
+# Stuck detection (v6.2):
+#     stuck := floor_streak ≥ 5
 #   where
-#     signfail_streak += 1 if best_angle == 0 else 0
-#     floor_streak    += 1 if θ_max_cur ≤ 1.1 × theta_min_bound else 0
+#     floor_streak += 1 if θ_max_cur ≤ 1.1 × theta_min_bound else 0
+#
+# Note: original v6 also required signfail_streak ≥ 5, but empirical max
+# signfail_streak across whole runs was only 3 — sign-fails never persist
+# because next iter samples fresh u. Floor_streak is the reliable signal.
 #
 # Cost per attempt: 1 to 2*K queries (typical 1-3)
 # ============================================================================
@@ -45,8 +48,8 @@ class Proposed_attack():
                  shrink_thresh=0.15,
                  BS_iter=3,
                  # ★ v6 escape params
-                 escape_signfail_streak=5,    # consecutive best_θ==0 needed
-                 escape_floor_streak=5,        # consecutive θ_max≤floor needed
+                 escape_signfail_streak=0,    # ★ v6.2: disabled (max obs sfs=3, never reaches 5)
+                 escape_floor_streak=5,        # ★ v6.2: now the ONLY trigger condition
                  escape_gamma=0.995,           # forced radius factor
                  escape_phi=None,              # swing angle; None → arccos(gamma) ≈ 5.7°
                  escape_K_u=5,                 # fresh u proposals per attempt
@@ -425,11 +428,13 @@ class Proposed_attack():
                 floor_streak = 0
 
             escape_log = ''
+            # ★ v6.2: trigger purely on floor_streak (sfs condition skipped if thresh=0)
+            sfs_ok = (self.escape_signfail_streak == 0) or (signfail_streak >= self.escape_signfail_streak)
+            fls_ok = (floor_streak >= self.escape_floor_streak)
             if (it >= self.escape_warmup
                 and cooldown == 0
                 and escape_attempts < self.escape_max_attempts
-                and signfail_streak >= self.escape_signfail_streak
-                and floor_streak    >= self.escape_floor_streak):
+                and sfs_ok and fls_ok):
 
                 # Trigger RayS-like escape
                 escape_attempts += 1
@@ -467,7 +472,7 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1 or escape_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v6-explore-rays iter -> ' + str(it) +
+                    print('Manifold2D-v6.2-explore-rays iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
