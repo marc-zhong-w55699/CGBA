@@ -7,26 +7,29 @@ import math
 
 
 # ============================================================================
-# CIFAR-10 M2D-explore (λ=0.2,0.2,0.6) + v5b adaptive theta_max + v6.1 escape.
+# CIFAR-10 M2D-explore (λ=0.2,0.2,0.6) + v5b adaptive theta_max
+#                                       + v6 RayS-like escape
 # Pure attack class. No DCT.
 #
-# v6 KEY ADDITION (vs v5):
-#   When 2D circular gets "stuck" in local region, trigger FORCED RADIAL RESET:
-#     - Pick radius γ·r and swing angle φ=arccos(γ), decoupled from cos(θ) cap
-#     - Try K fresh u proposals × ±s at this (radius, angle); accept first hit
-#     - On success: jump x_b deeper into adv interior, reset θ_max to π/3
-#     - On failure: cooldown a few iters, continue 2D
+# v6 KEY: when 2D circular is genuinely stuck (signfail_streak AND floor_streak
+# both ≥ 5), launch a RayS-like escape — K fresh random u proposals, each
+# tries forced-shrink to radius γr at swing angle φ=arccos(γ). No bin-search
+# (saves 5-7 q/ray); accept first adv hit.
 #
-# v6.1 changes (tuned from first ViT run):
-#   shrink_thresh: 0.995 → 0.99    (more permissive trigger, 70% no-trigger → fixed)
-#   gamma:         0.99  → 0.995   (softer shrink to lift success rate from 0%)
-#   K_u:           1     → 3       (multi-direction fallback)
+# Differences vs v6.0/v6.1:
+#   * Trigger uses STREAK conditions (not norm-window), so fires only when 2D
+#     has truly produced zero progress for several consecutive iters
+#   * Post-escape θ_max ← escape_phi (NOT π/3) to avoid the "trap" bug where
+#     reset to 60° caused immediate sign-fail in narrow adv pockets
+#   * Total escape attempts capped per image to prevent query-budget runaway
 #
-# Stuck detection (sliding window):
-#     stuck := norm[-1] / norm[-W] > shrink_thresh
-#   where W = 30, shrink_thresh = 0.99 (less than 1% shrink over 30 iters)
+# Stuck detection:
+#     stuck := (signfail_streak ≥ 5) AND (floor_streak ≥ 5)
+#   where
+#     signfail_streak += 1 if best_angle == 0 else 0
+#     floor_streak    += 1 if θ_max_cur ≤ 1.1 × theta_min_bound else 0
 #
-# Cost per attempt: 1-6 queries (was 1-2 in v6.0)
+# Cost per attempt: 1 to 2*K queries (typical 1-3)
 # ============================================================================
 
 
@@ -42,13 +45,14 @@ class Proposed_attack():
                  shrink_thresh=0.15,
                  BS_iter=3,
                  # ★ v6 escape params
-                 escape_window=30,            # W: norm sliding window size
-                 escape_shrink_thresh=0.99,   # ★ v6.1: 0.995 → 0.99 (more permissive trigger)
-                 escape_cooldown=10,          # iters to wait after each trigger
-                 escape_gamma=0.995,          # ★ v6.1: 0.99 → 0.995 (softer shrink, more likely to succeed)
-                 escape_phi=None,             # swing angle; None → arccos(gamma) ≈ 5.7° at γ=0.995
-                 escape_warmup=100,           # don't trigger before this iter
-                 escape_K_u=3):               # ★ v6.1: try K fresh u proposals per attempt (was 1)
+                 escape_signfail_streak=5,    # consecutive best_θ==0 needed
+                 escape_floor_streak=5,        # consecutive θ_max≤floor needed
+                 escape_gamma=0.995,           # forced radius factor
+                 escape_phi=None,              # swing angle; None → arccos(gamma) ≈ 5.7°
+                 escape_K_u=5,                 # fresh u proposals per attempt
+                 escape_cooldown=30,           # iters before re-arming after trigger
+                 escape_max_attempts=8,        # hard cap per image
+                 escape_warmup=100):           # earliest iter to allow trigger
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -73,13 +77,14 @@ class Proposed_attack():
         self.BS_iter = BS_iter
 
         # ★ v6 escape
-        self.escape_window = escape_window
-        self.escape_shrink_thresh = escape_shrink_thresh
-        self.escape_cooldown = escape_cooldown
-        self.escape_gamma = escape_gamma
-        self.escape_phi = escape_phi if escape_phi is not None else math.acos(escape_gamma)
-        self.escape_warmup = escape_warmup
-        self.escape_K_u = escape_K_u   # ★ v6.1
+        self.escape_signfail_streak = escape_signfail_streak
+        self.escape_floor_streak    = escape_floor_streak
+        self.escape_gamma           = escape_gamma
+        self.escape_phi             = escape_phi if escape_phi is not None else math.acos(escape_gamma)
+        self.escape_K_u             = escape_K_u
+        self.escape_cooldown        = escape_cooldown
+        self.escape_max_attempts    = escape_max_attempts
+        self.escape_warmup          = escape_warmup
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.all_queries = 0
@@ -258,20 +263,15 @@ class Proposed_attack():
 
 
     # ============================================================================
-    # ★ v6 KEY: forced radial reset (v6.1: K fresh u proposals)
+    # ★ v6 RayS-like escape: K fresh u × forced shrink (no bin-search)
     # ============================================================================
-    def _forced_radial_reset(self, x_o, x_b, u_hint):
+    def _rays_like_escape(self, x_o, x_b):
         """
-        Stuck escape: try K direction proposals at fixed radius gamma*r,
-        swing angle phi. Returns (x_new, num_queries, success).
+        Stuck escape: try K fresh u proposals; for each, verify if
+        x_o + γr*(cos(φ)*v + s*sin(φ)*u) is adversarial. Accept first hit.
 
-        Strategy (v6.1):
-          1st u: u_hint (whatever current proposal is)
-          2nd..K u: fresh random Gaussian, projected ⊥ v
-
-        For each u, verify s=+1 then s=-1 (2 queries each).
-        Accept first successful candidate, return immediately.
-        Worst-case cost: 2*K queries; typical: 1-3.
+        Returns (x_new, num_queries, success).
+        Worst-case 2*K queries (each u tries ±s); typical 1-3.
         """
         gamma = self.escape_gamma
         phi = self.escape_phi
@@ -288,17 +288,12 @@ class Proposed_attack():
         num_q = 0
 
         for k in range(K):
-            # Pick u proposal
-            if k == 0:
-                u_raw = u_hint
-            else:
-                u_raw = torch.randn(x_o.shape).to(self.device)
-
-            # Project ⊥ v and normalize
+            # All K proposals are fresh random (no u_hint — stuck means current
+            # direction is bad, so re-roll completely).
+            u_raw = torch.randn(x_o.shape).to(self.device)
             u = u_raw - torch.dot(u_raw.reshape(-1), v.reshape(-1)) * v
             u_norm = torch.norm(u)
             if u_norm < 1e-8:
-                # u collapsed; try fresh random next time
                 continue
             u = u / u_norm
 
@@ -320,7 +315,6 @@ class Proposed_attack():
             if self.is_adversarial(x_cand) == 1:
                 return x_cand, num_q, True
 
-        # All K proposals failed
         return x_b, num_q, False
 
 
@@ -363,13 +357,11 @@ class Proposed_attack():
         theta_history = []
 
         # ★ v6 escape state
-        cooldown_counter = 0
+        signfail_streak = 0
+        floor_streak    = 0
+        cooldown        = 0
         escape_attempts = 0
         escape_success  = 0
-        last_escape_iter = -1
-
-        # Track norms in raw float for sliding window
-        norm_history = [float(norm_initial.item())]
 
         for it in range(outer_iter):
             diff = x_b - self.src_img
@@ -395,7 +387,6 @@ class Proposed_attack():
                 if u_new is None:
                     u_new = d3
 
-            # Standard 2D circular step
             x_adv, qs, best_angle = self.manifold_search_2d(
                 self.src_img, x_b, u=u_new, theta_max_cur=theta_max_cur
             )
@@ -419,65 +410,75 @@ class Proposed_attack():
 
             x_adv_inv = self.inv_tf(copy.deepcopy(x_adv.cpu()[0,:,:,:].squeeze()), self.mean, self.std)
             norm = torch.norm(x_inv - x_adv_inv)
-            norm_history.append(float(norm.item()))
 
             # ============================================================
-            # ★ v6: stuck detection + forced radial reset
+            # ★ v6: streak tracking + RayS-like escape
             # ============================================================
+            # Update streaks
+            if best_angle == 0:
+                signfail_streak += 1
+            else:
+                signfail_streak = 0
+            if theta_max_cur <= 1.1 * self.theta_min_bound:
+                floor_streak += 1
+            else:
+                floor_streak = 0
+
             escape_log = ''
             if (it >= self.escape_warmup
-                and cooldown_counter == 0
-                and len(norm_history) > self.escape_window):
+                and cooldown == 0
+                and escape_attempts < self.escape_max_attempts
+                and signfail_streak >= self.escape_signfail_streak
+                and floor_streak    >= self.escape_floor_streak):
 
-                recent_n = norm_history[-1]
-                past_n   = norm_history[-(self.escape_window + 1)]
-                if past_n > 0 and (recent_n / past_n) > self.escape_shrink_thresh:
-                    # STUCK: trigger forced radial reset
-                    escape_attempts += 1
-                    last_escape_iter = it
-                    x_new, qs_esc, success = self._forced_radial_reset(
-                        self.src_img, x_b, u_hint=u_new
-                    )
-                    q_num += qs_esc
-                    total_escape_queries += qs_esc
+                # Trigger RayS-like escape
+                escape_attempts += 1
+                x_new, qs_esc, success = self._rays_like_escape(self.src_img, x_b)
+                q_num += qs_esc
+                total_escape_queries += qs_esc
 
-                    if success:
-                        escape_success += 1
-                        # Recompute norm after jump
-                        x_new_inv = self.inv_tf(copy.deepcopy(x_new.cpu()[0,:,:,:].squeeze()), self.mean, self.std)
-                        new_norm = torch.norm(x_inv - x_new_inv)
-                        norm_history[-1] = float(new_norm.item())   # update last
-                        x_b = x_new
-                        x_adv = x_new
-                        norm = new_norm
-                        # Reset adaptive theta_max to give it room to re-expand
-                        theta_max_cur = self.theta_max
-                        # Clear u_prev/x_e_prev — they're stale after reset
-                        u_prev = None
-                        x_e_prev = None
-                        x_b_prev = None
-                        escape_log = f'  [ESCAPE✓ q={qs_esc} r:{past_n:.3f}→{recent_n:.3f}→{float(new_norm.item()):.3f}]'
-                    else:
-                        escape_log = f'  [ESCAPE✗ q={qs_esc}]'
+                if success:
+                    escape_success += 1
+                    x_new_inv = self.inv_tf(copy.deepcopy(x_new.cpu()[0,:,:,:].squeeze()), self.mean, self.std)
+                    new_norm = torch.norm(x_inv - x_new_inv)
+                    x_b = x_new
+                    x_adv = x_new
+                    norm = new_norm
+                    # ★ KEY FIX vs v6.1: reset θ_max to escape_phi, NOT π/3
+                    # (avoids the "60° probe lands outside narrow finger" trap)
+                    theta_max_cur = self.escape_phi
+                    # Clear momentum (stale after jump)
+                    u_prev = None
+                    x_e_prev = None
+                    x_b_prev = None
+                    # Reset streaks (give 2D a fresh chance)
+                    signfail_streak = 0
+                    floor_streak    = 0
+                    escape_log = (f'  [ESCAPE✓ #{escape_attempts}/{self.escape_max_attempts} '
+                                  f'q={qs_esc} r→{float(new_norm.item()):.3f} '
+                                  f'θ_max→{math.degrees(self.escape_phi):.1f}°]')
+                else:
+                    escape_log = (f'  [ESCAPE✗ #{escape_attempts}/{self.escape_max_attempts} '
+                                  f'q={qs_esc}]')
 
-                    cooldown_counter = self.escape_cooldown
-            elif cooldown_counter > 0:
-                cooldown_counter -= 1
+                cooldown = self.escape_cooldown
+            elif cooldown > 0:
+                cooldown -= 1
 
             if it % 50 == 0 or it == outer_iter - 1 or escape_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v6.1-explore iter -> ' + str(it) +
+                    print('Manifold2D-v6-explore-rays iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
                           f'   θ_max={math.degrees(theta_max_cur):.1f}°' +
                           f'   best_θ={math.degrees(best_angle):.1f}°' +
+                          f'   sfs={signfail_streak} fls={floor_streak}' +
                           escape_log)
 
             norms.append(norm)
             n_query.append(q_num)
 
-        # Final summary
         print(f'\n── Query num ──────────────────────────────────')
         print(f'Gradient estimation queries : {total_grad_queries}')
         print(f'Boundary search queries     : {total_boundary_queries}')
@@ -489,8 +490,10 @@ class Proposed_attack():
                   f'mean={math.degrees(np.mean(theta_history)):.1f}°, '
                   f'min={math.degrees(min(theta_history)):.1f}°, '
                   f'max={math.degrees(max(theta_history)):.1f}°')
-        print(f'Escape stats: attempts={escape_attempts}, success={escape_success}'
-              + (f' ({100*escape_success/escape_attempts:.1f}% success rate)' if escape_attempts > 0 else ''))
+        print(f'Escape stats: attempts={escape_attempts}/{self.escape_max_attempts}, '
+              f'success={escape_success}'
+              + (f' ({100*escape_success/escape_attempts:.1f}% rate)'
+                 if escape_attempts > 0 else ''))
         print(f'────────────────────────────────────────────────')
 
         x_adv = clip_image_values(x_adv, self.lb, self.ub)
