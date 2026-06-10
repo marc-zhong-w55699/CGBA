@@ -8,34 +8,32 @@ import math
 
 # ============================================================================
 # CIFAR-10 M2D-explore (λ=0.2,0.2,0.6) + v5b adaptive theta_max
-#                                       + v6.3 1D-ray escape
+#                                       + v6.4 floor-bounce
 # Pure attack class. No DCT.
 #
-# v6.3 KEY: when 2D is genuinely stuck (≥2 floor-entry events in last 1000
-# queries), launch a 1D-RAY escape:
-#   1. Keep current radius r unchanged
-#   2. Sample fresh random direction d ∈ R^n (entire ambient space, NOT
-#      projected onto the 2D plane)
-#   3. Probe x_o + r·d: if adversarial, run bin_search(x_o, x_o+r·d, n=10)
-#      to find a tighter boundary point at some r' ≤ r
-#   4. If not adversarial, try next random direction (up to K_dir)
+# v6.4 KEY: replaces all "escape mechanism" attempts (v6.0-v6.3) with a
+# much simpler mechanism — when adaptive θ_max stays at floor for ≥ N
+# consecutive iterations, FORCE θ_max back to the initial value (π/3) and
+# clear momentum state. This gives 2D a chance to find a larger swing in
+# the next iter without spending any escape queries.
 #
-# Post-escape:
-#   * x_b = bin_search result (on actual boundary, not interior pocket)
-#   * θ_max ← initial / 2 = π/6 (= 30°) to give 2D a meaningful restart range
-#   * Clear u_prev / x_e_prev (stale after direction change)
+# Mechanism:
+#   if floor_streak >= bump_streak:
+#       theta_max_cur = bump_target        # bump to π/6 = 30° (conservative)
+#       u_prev, x_e_prev, x_b_prev = None, None, None   # fresh u
+#       floor_streak = 0
 #
-# Trigger detail:
-#   * Track query-counts at each floor ENTRY (transition from > floor to ≤
-#     floor), trim to last 1000 queries
-#   * Trigger when ≥ 2 entries remain in the window
-#   * Cooldown=30, max_attempts=8 per image
+# Cost: ZERO escape queries. The bump just lets the next 2D step probe a
+# bigger angle (mostly wasting ~5 sign-fail queries that iter, but no
+# external machinery).
 #
-# Differences vs v6.0-v6.2:
-#   * Random direction is in FULL R^n (not perp-to-v in 2D plane)
-#   * Uses bin_search (cost ~10q on success) → finds REAL boundary
-#   * No γ shrink factor — radius reduction comes from bin_search, not forced
-#   * Trigger counts floor-entry events, not streaks
+# Why v6.0-v6.3 failed (background):
+#   * v6.0-v6.2 (forced shrink γr): jumps into narrow adv pocket → trap
+#   * v6.3 (1D ray): random direction in R^n almost never adv at radius r
+#     on ViT — 0% success rate observed.
+#
+# v6.4 doesn't assume any "exploitable pocket". It only relies on the
+# stochastic chance that fresh u + bigger θ_max range finds a swing.
 # ============================================================================
 
 
@@ -50,15 +48,11 @@ class Proposed_attack():
                  shrink_factor=0.85,
                  shrink_thresh=0.15,
                  BS_iter=3,
-                 # ★ v6.3 escape params
-                 escape_floor_events=2,        # ≥ this many floor entries in window → trigger
-                 escape_window_queries=1000,   # sliding window over query budget
-                 escape_K_dir=5,                # try up to this many random directions per attempt
-                 escape_bs_iter=10,             # bin_search depth on success
-                 escape_cooldown=30,
-                 escape_max_attempts=8,
-                 escape_warmup=100,
-                 escape_theta_reset=None):      # None → theta_max / 2
+                 # ★ v6.4 floor bounce params
+                 bump_floor_streak=10,        # bump θ_max after this many consecutive floor iters
+                 bump_target=math.pi / 6,      # value to bump to; π/6 = 30° (conservative, vs initial π/3)
+                 bump_warmup=100,              # earliest iter to allow bump
+                 bump_max_per_image=50):       # safety cap on number of bumps per image
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -82,17 +76,11 @@ class Proposed_attack():
         self.shrink_thresh = shrink_thresh
         self.BS_iter = BS_iter
 
-        # ★ v6.3 escape
-        self.escape_floor_events   = escape_floor_events
-        self.escape_window_queries = escape_window_queries
-        self.escape_K_dir          = escape_K_dir
-        self.escape_bs_iter        = escape_bs_iter
-        self.escape_cooldown       = escape_cooldown
-        self.escape_max_attempts   = escape_max_attempts
-        self.escape_warmup         = escape_warmup
-        self.escape_theta_reset    = (escape_theta_reset
-                                      if escape_theta_reset is not None
-                                      else theta_max / 2.0)
+        # ★ v6.4 floor bounce
+        self.bump_floor_streak   = bump_floor_streak
+        self.bump_target         = bump_target
+        self.bump_warmup         = bump_warmup
+        self.bump_max_per_image  = bump_max_per_image
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.all_queries = 0
@@ -270,53 +258,12 @@ class Proposed_attack():
 
 
 
-    # ============================================================================
-    # ★ v6.3 1D-ray escape: sample random direction in R^n, probe at radius r,
-    #                       if adv → bin_search; if not adv → next direction.
-    # ============================================================================
-    def _ray_escape(self, x_o, x_b):
-        """
-        Returns (x_new, num_queries, success).
-
-        Cost: 1 to K_dir queries on probe phase + escape_bs_iter on success.
-        Worst case (all probes fail): K_dir queries.
-        Typical success case: ~3 probes + bs_iter ≈ 13 queries.
-        """
-        r = torch.norm(x_b - x_o)
-        if r < 1e-8:
-            return x_b, 0, False
-
-        num_q = 0
-        for k in range(self.escape_K_dir):
-            # Fresh random unit vector in the AMBIENT space (no projection)
-            d_raw = torch.randn(x_o.shape).to(self.device)
-            d_norm = torch.norm(d_raw)
-            if d_norm < 1e-8:
-                continue
-            d = d_raw / d_norm
-
-            # Probe at x_o + r·d (same radius as current x_b)
-            x_test = clip_image_values(x_o + r * d, self.lb, self.ub).to(self.device)
-            num_q += 1
-            if self.is_adversarial(x_test) == 1:
-                # Found adversarial at same radius in new direction
-                # bin_search from x_o (non-adv) to x_test (adv) to find tighter boundary
-                x_b_new, bs_calls = self.bin_search(x_o, x_test, max_calls=self.escape_bs_iter)
-                num_q += bs_calls
-                return x_b_new, num_q, True
-
-        # All K_dir directions failed
-        return x_b, num_q, False
-
-
-
     def Attack(self):
         norms = []
         n_query = []
         grad = 0
         total_grad_queries     = 0
         total_boundary_queries = 0
-        total_escape_queries   = 0
 
         x_inv = self.inv_tf(copy.deepcopy(self.src_img.cpu()[0,:,:,:].squeeze()), self.mean, self.std)
         if self.tar_img == None:
@@ -347,12 +294,9 @@ class Proposed_attack():
         theta_max_cur = self.theta_max
         theta_history = []
 
-        # ★ v6.3 escape state
-        floor_entry_qs = []   # query counts at floor-entry events
-        was_at_floor   = False
-        cooldown       = 0
-        escape_attempts = 0
-        escape_success  = 0
+        # ★ v6.4 floor bounce state
+        floor_streak  = 0
+        bump_count    = 0
 
         for it in range(outer_iter):
             diff = x_b - self.src_img
@@ -403,67 +347,38 @@ class Proposed_attack():
             norm = torch.norm(x_inv - x_adv_inv)
 
             # ============================================================
-            # ★ v6.3: floor-entry tracking + 1D-ray escape
+            # ★ v6.4: floor bounce
             # ============================================================
+            bump_log = ''
             is_at_floor = theta_max_cur <= 1.1 * self.theta_min_bound
-            if is_at_floor and not was_at_floor:
-                # New floor-entry event
-                floor_entry_qs.append(q_num)
-            was_at_floor = is_at_floor
+            if is_at_floor:
+                floor_streak += 1
+            else:
+                floor_streak = 0
 
-            # Trim window to last `escape_window_queries` queries
-            while floor_entry_qs and (q_num - floor_entry_qs[0]) > self.escape_window_queries:
-                floor_entry_qs.pop(0)
+            if (it >= self.bump_warmup
+                and floor_streak >= self.bump_floor_streak
+                and bump_count < self.bump_max_per_image):
 
-            escape_log = ''
-            if (it >= self.escape_warmup
-                and cooldown == 0
-                and escape_attempts < self.escape_max_attempts
-                and len(floor_entry_qs) >= self.escape_floor_events):
+                # BUMP: force θ_max back to target, clear momentum
+                bump_count += 1
+                theta_max_cur = self.bump_target
+                u_prev = None
+                x_e_prev = None
+                x_b_prev = None
+                floor_streak = 0
+                bump_log = (f'  [BUMP #{bump_count} θ_max→{math.degrees(self.bump_target):.0f}°]')
 
-                # Trigger 1D-ray escape
-                escape_attempts += 1
-                x_new, qs_esc, success = self._ray_escape(self.src_img, x_b)
-                q_num += qs_esc
-                total_escape_queries += qs_esc
-
-                if success:
-                    escape_success += 1
-                    x_new_inv = self.inv_tf(copy.deepcopy(x_new.cpu()[0,:,:,:].squeeze()), self.mean, self.std)
-                    new_norm = torch.norm(x_inv - x_new_inv)
-                    x_b = x_new
-                    x_adv = x_new
-                    # update norm (escape might have moved x_b to lower r)
-                    norm = new_norm
-                    # Reset adaptive theta_max to half-initial
-                    theta_max_cur = self.escape_theta_reset
-                    # Clear stale momentum/progress
-                    u_prev = None
-                    x_e_prev = None
-                    x_b_prev = None
-                    # Clear floor-entry queue so we don't immediately re-trigger
-                    floor_entry_qs = []
-                    escape_log = (f'  [ESCAPE✓ #{escape_attempts}/{self.escape_max_attempts} '
-                                  f'q={qs_esc} r→{float(new_norm.item()):.3f} '
-                                  f'θ_max→{math.degrees(self.escape_theta_reset):.1f}°]')
-                else:
-                    escape_log = (f'  [ESCAPE✗ #{escape_attempts}/{self.escape_max_attempts} '
-                                  f'q={qs_esc}]')
-
-                cooldown = self.escape_cooldown
-            elif cooldown > 0:
-                cooldown -= 1
-
-            if it % 50 == 0 or it == outer_iter - 1 or escape_log:
+            if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v6.3-explore-rayBS iter -> ' + str(it) +
+                    print('Manifold2D-v6.4-explore-bump iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
                           f'   θ_max={math.degrees(theta_max_cur):.1f}°' +
                           f'   best_θ={math.degrees(best_angle):.1f}°' +
-                          f'   flr_evts={len(floor_entry_qs)}' +
-                          escape_log)
+                          f'   flr_streak={floor_streak}' +
+                          bump_log)
 
             norms.append(norm)
             n_query.append(q_num)
@@ -471,7 +386,6 @@ class Proposed_attack():
         print(f'\n── Query num ──────────────────────────────────')
         print(f'Gradient estimation queries : {total_grad_queries}')
         print(f'Boundary search queries     : {total_boundary_queries}')
-        print(f'Escape queries              : {total_escape_queries}')
         print(f'Total queries               : {q_num}')
         if theta_history:
             print(f'θ_max trajectory: init={math.degrees(theta_history[0]):.1f}°, '
@@ -479,10 +393,7 @@ class Proposed_attack():
                   f'mean={math.degrees(np.mean(theta_history)):.1f}°, '
                   f'min={math.degrees(min(theta_history)):.1f}°, '
                   f'max={math.degrees(max(theta_history)):.1f}°')
-        print(f'Escape stats: attempts={escape_attempts}/{self.escape_max_attempts}, '
-              f'success={escape_success}'
-              + (f' ({100*escape_success/escape_attempts:.1f}% rate)'
-                 if escape_attempts > 0 else ''))
+        print(f'Bump count: {bump_count}/{self.bump_max_per_image}')
         print(f'────────────────────────────────────────────────')
 
         x_adv = clip_image_values(x_adv, self.lb, self.ub)
