@@ -7,58 +7,47 @@ import math
 
 
 # ============================================================================
-# CIFAR-10 M2D-explore (λ=0.2,0.2,0.6) + v5b adaptive theta_max
-#                                       + v6.4 reverse floor-bump
-# Pure attack class. No DCT.
+# ImageNet M2D-explore (λ=0.2,0.2,0.6)
+#   + DCT (square low-freq block, dct_ratio=1/8)
+#   + v3 geometry (circular evolution)
+#   + v5b adaptive theta_max + BS_iter=3
+#   + v6.4 reverse floor-bump
 #
-# v6.4 KEY: when adaptive θ_max stays at floor for ≥ N consecutive iters,
-# FORCE θ_max to a value SMALLER than the floor (a "reverse bump"). This
-# gives the next 2D step a tiny probe angle that's more likely to fit
-# inside the boundary's narrow adversarial sliver, then adaptive recovers.
+# v6.4 KEY (vs v5): when adaptive θ_max stays at floor for ≥ N consecutive
+# iters, FORCE θ_max to a value SMALLER than the floor (a "reverse bump").
+# This gives the next 2D step a tiny probe angle that's more likely to fit
+# inside the boundary's narrow adversarial sliver. Then adaptive recovers.
 #
-# Default config (current):
-#   theta_min_bound = π/90   (= 2°,   adaptive floor)
-#   bump_target     = π/360  (= 0.5°, reverse bump destination)
+# Default config:
+#   theta_min_bound = π/90   (= 2°,   adaptive floor; lowered from π/60)
+#   bump_target     = π/360  (= 0.5°, reverse bump destination, below floor)
 #   bump_floor_streak = 10   (trigger after 10 consec floor iters)
-#
-# Mechanism:
-#   if floor_streak >= bump_streak:
-#       theta_max_cur = bump_target    # 0.5°, BELOW the 2° floor
-#       u_prev, x_e_prev, x_b_prev = None, None, None   # fresh u
-#       floor_streak = 0
-#   # next 2D iter probes at 0.5°/4 = 0.125°  → high sign-success rate
-#   # then adaptive shrink clips back to theta_min_bound = 2°
 #
 # Cost: ZERO extra queries. The bump iter spends fewer queries than usual
 # (because tiny probe angle ⇒ sign probe usually succeeds first try).
 #
-# Why earlier escape mechanisms (v6.0-v6.3) failed:
-#   * v6.0-v6.2 (forced radial shrink γr): jumps into narrow adv pocket → trap
-#   * v6.3 (1D ray, random direction in R^n): 0% success — at radius r on ViT
-#     the boundary doesn't admit random ambient-space directions
-#
-# v6.4 doesn't try to "escape" — it adapts the probe angle DOWN to match
-# the boundary's true geometric scale at small radii (where the swing
-# tolerance is well below 1° on ViT).
+# ImageNet-specific: keeps the simple DCT (square low-freq, dct_ratio=1/8)
+# direction sampling from v5. DCT prior + reverse bump together.
 # ============================================================================
 
 
 class Proposed_attack():
     def __init__(self, model, src_img, mean, std, lb, ub, dim_reduc_factor=4,
-                 tar_img=None, iteration=1600, tol=1e-5, attack_method='manifold_search_2d',
+                 tar_img=None, iteration=700, tol=1e-5, attack_method='manifold_search_2d',
                  verbose_control='Yes',
+                 dct_ratio=1.0/8,
                  theta_max=math.pi / 3,
-                 theta_min_bound=math.pi / 90,    # ★ v6.4: lowered from π/60 (3°) to π/90 (2°)
+                 theta_min_bound=math.pi / 90,    # ★ v6.4: 2° (lowered from π/60)
                  theta_max_bound=math.pi / 2,
                  grow_factor=1.15,
                  shrink_factor=0.85,
                  shrink_thresh=0.15,
                  BS_iter=3,
                  # ★ v6.4 reverse floor bump params
-                 bump_floor_streak=10,        # bump θ_max after this many consecutive floor iters
-                 bump_target=math.pi / 360,    # value to bump to; π/360 = 0.5° (REVERSE bump, below floor)
-                 bump_warmup=100,              # earliest iter to allow bump
-                 bump_max_per_image=50):       # safety cap on number of bumps per image
+                 bump_floor_streak=10,
+                 bump_target=math.pi / 360,        # 0.5° (REVERSE, below 2° floor)
+                 bump_warmup=100,
+                 bump_max_per_image=50):
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -74,6 +63,7 @@ class Proposed_attack():
         self.verbose_control = verbose_control
         self.attack_method = attack_method
         self.dim_reduc_factor = dim_reduc_factor
+        self.dct_ratio = dct_ratio
         self.theta_max = theta_max
         self.theta_min_bound = theta_min_bound
         self.theta_max_bound = theta_max_bound
@@ -82,7 +72,7 @@ class Proposed_attack():
         self.shrink_thresh = shrink_thresh
         self.BS_iter = BS_iter
 
-        # ★ v6.4 floor bounce
+        # ★ v6.4
         self.bump_floor_streak   = bump_floor_streak
         self.bump_target         = bump_target
         self.bump_warmup         = bump_warmup
@@ -90,6 +80,35 @@ class Proposed_attack():
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.all_queries = 0
+
+        _, _, H, W = self.src_img.shape
+        self._H, self._W = H, W
+        self._Dh = self._dct_matrix(H).to(self.device)
+        self._Dw = self._Dh if W == H else self._dct_matrix(W).to(self.device)
+        self._k_h = max(1, int(round(H * self.dct_ratio)))
+        self._k_w = max(1, int(round(W * self.dct_ratio)))
+
+
+
+    def _dct_matrix(self, N):
+        n = torch.arange(N, dtype=torch.float32).view(1, -1)
+        k = torch.arange(N, dtype=torch.float32).view(-1, 1)
+        D = torch.cos(math.pi * (2 * n + 1) * k / (2 * N))
+        D = D * math.sqrt(2.0 / N)
+        D[0] = D[0] / math.sqrt(2.0)
+        return D
+
+    def _idct2d(self, coeff):
+        tmp = torch.einsum('ij,cjk->cik', self._Dh.t(), coeff)
+        x   = torch.einsum('cik,kl->cil', tmp, self._Dw)
+        return x
+
+    def _low_freq_random(self, shape):
+        _, C, H, W = shape
+        coeff = torch.zeros(C, H, W, device=self.device)
+        coeff[:, :self._k_h, :self._k_w] = torch.randn(C, self._k_h, self._k_w, device=self.device)
+        spatial = self._idct2d(coeff)
+        return spatial.unsqueeze(0)
 
 
 
@@ -113,7 +132,7 @@ class Proposed_attack():
         candidate = image
         max_calls=50
         for _ in range(n):
-            u = torch.randn(image.shape).to(self.device)
+            u = self._low_freq_random(image.shape).to(self.device)
             u = u / torch.norm(u)
 
             eps = step
@@ -138,7 +157,7 @@ class Proposed_attack():
         step_fb = 0.02
         perturbed = image
         while self.is_adversarial(perturbed) == -1:
-            pert = torch.randn(image.shape).to(self.device)
+            pert = self._low_freq_random(image.shape).to(self.device)
             perturbed = image + num_calls * step_fb * pert
             perturbed = clip_image_values(perturbed, self.lb, self.ub).to(self.device)
             num_calls += 1
@@ -215,12 +234,12 @@ class Proposed_attack():
         v = diff / r
 
         if u is None:
-            u = torch.randn(x_o.shape).to(self.device)
+            u = self._low_freq_random(x_o.shape).to(self.device)
         u = u.to(self.device)
         u = u - torch.dot(u.reshape(-1), v.reshape(-1)) * v
         u_norm = torch.norm(u)
         if u_norm < 1e-8:
-            u = torch.randn(x_o.shape).to(self.device)
+            u = self._low_freq_random(x_o.shape).to(self.device)
             u = u - torch.dot(u.reshape(-1), v.reshape(-1)) * v
             u_norm = torch.norm(u)
         u = u / u_norm
@@ -296,11 +315,10 @@ class Proposed_attack():
         x_b_prev = None
         x_adv = x_b
 
-        # v5 adaptive theta_max
         theta_max_cur = self.theta_max
         theta_history = []
 
-        # ★ v6.4 floor bounce state
+        # ★ v6.4 reverse floor bump state
         floor_streak  = 0
         bump_count    = 0
 
@@ -314,7 +332,7 @@ class Proposed_attack():
             d1 = self._proj_and_normalize(x_e_prev - x_b_prev, v_new) \
                  if (x_e_prev is not None and x_b_prev is not None) else None
             d2 = self._proj_and_normalize(u_prev, v_new) if u_prev is not None else None
-            d3 = self._proj_and_normalize(torch.randn(x_b.shape).to(self.device), v_new)
+            d3 = self._proj_and_normalize(self._low_freq_random(x_b.shape).to(self.device), v_new)
 
             if d1 is None and d2 is None:
                 u_new = d3
@@ -353,7 +371,7 @@ class Proposed_attack():
             norm = torch.norm(x_inv - x_adv_inv)
 
             # ============================================================
-            # ★ v6.4: floor bounce
+            # ★ v6.4: reverse floor bump
             # ============================================================
             bump_log = ''
             is_at_floor = theta_max_cur <= 1.1 * self.theta_min_bound
@@ -366,18 +384,17 @@ class Proposed_attack():
                 and floor_streak >= self.bump_floor_streak
                 and bump_count < self.bump_max_per_image):
 
-                # BUMP: force θ_max back to target, clear momentum
                 bump_count += 1
                 theta_max_cur = self.bump_target
                 u_prev = None
                 x_e_prev = None
                 x_b_prev = None
                 floor_streak = 0
-                bump_log = (f'  [BUMP #{bump_count} θ_max→{math.degrees(self.bump_target):.0f}°]')
+                bump_log = (f'  [BUMP #{bump_count} θ_max→{math.degrees(self.bump_target):.2f}°]')
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v6.4-explore-bump iter -> ' + str(it) +
+                    print('Manifold2D-v6.4-explore-dct iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
