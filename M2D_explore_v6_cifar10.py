@@ -373,7 +373,7 @@ class Proposed_attack():
                 x_e_prev = None
                 x_b_prev = None
                 floor_streak = 0
-                bump_log = (f'  [BUMP #{bump_count} θ_max→{math.degrees(self.bump_target):.0f}°]')
+                bump_log = (f'  [BUMP #{bump_count} θ_max→{math.degrees(self.bump_target):.2f}°]')
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
