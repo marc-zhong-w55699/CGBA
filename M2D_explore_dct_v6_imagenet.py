@@ -37,7 +37,7 @@ class Proposed_attack():
                  verbose_control='Yes',
                  dct_ratio=1.0/8,
                  theta_max=math.pi / 3,
-                 theta_min_bound=math.pi / 180,    # ★ v6.4: 2° (lowered from π/180)
+                 theta_min_bound=math.pi / 90,    # ★ v6.4: 2° (lowered from π/180)
                  theta_max_bound=math.pi / 2,
                  grow_factor=1.15,
                  shrink_factor=0.85,
