@@ -56,7 +56,7 @@ class Proposed_attack():
                  BS_iter=3,
                  # ★ v6.4 reverse bump params (best_θ-based trigger)
                  bump_best_theta_thresh=math.pi / 180,  # trigger when best_θ ≤ this (= 1°)
-                 bump_streak=5,                # bump after K consecutive small best_θ iters
+                 bump_streak=2,                # bump after K consecutive small best_θ iters (5 → 2)
                  bump_target=math.pi / 360,    # value to bump to; π/360 = 0.5°
                  bump_warmup=100,              # earliest iter to allow bump
                  bump_max_per_image=50):       # safety cap on number of bumps per image
