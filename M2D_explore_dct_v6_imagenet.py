@@ -43,9 +43,10 @@ class Proposed_attack():
                  shrink_factor=0.85,
                  shrink_thresh=0.15,
                  BS_iter=3,
-                 # ★ v6.4 reverse floor bump params
-                 bump_floor_streak=10,
-                 bump_target=math.pi / 360,        # 0.5° (REVERSE, below 2° floor)
+                 # ★ v6.4 reverse bump params (best_θ-based trigger)
+                 bump_best_theta_thresh=math.pi / 180,  # trigger when best_θ ≤ this (= 1°)
+                 bump_streak=5,                    # bump after K consecutive small best_θ iters
+                 bump_target=math.pi / 360,        # 0.5° (REVERSE bump)
                  bump_warmup=100,
                  bump_max_per_image=50):
         self.model = model
@@ -72,11 +73,12 @@ class Proposed_attack():
         self.shrink_thresh = shrink_thresh
         self.BS_iter = BS_iter
 
-        # ★ v6.4
-        self.bump_floor_streak   = bump_floor_streak
-        self.bump_target         = bump_target
-        self.bump_warmup         = bump_warmup
-        self.bump_max_per_image  = bump_max_per_image
+        # ★ v6.4 reverse bump (best_θ-based)
+        self.bump_best_theta_thresh = bump_best_theta_thresh
+        self.bump_streak            = bump_streak
+        self.bump_target            = bump_target
+        self.bump_warmup            = bump_warmup
+        self.bump_max_per_image     = bump_max_per_image
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.all_queries = 0
@@ -318,9 +320,9 @@ class Proposed_attack():
         theta_max_cur = self.theta_max
         theta_history = []
 
-        # ★ v6.4 reverse floor bump state
-        floor_streak  = 0
-        bump_count    = 0
+        # ★ v6.4 reverse bump state (best_θ-based)
+        small_best_streak = 0
+        bump_count        = 0
 
         for it in range(outer_iter):
             diff = x_b - self.src_img
@@ -371,17 +373,17 @@ class Proposed_attack():
             norm = torch.norm(x_inv - x_adv_inv)
 
             # ============================================================
-            # ★ v6.4: reverse floor bump
+            # ★ v6.4: reverse bump triggered by best_θ ≤ thresh
             # ============================================================
             bump_log = ''
-            is_at_floor = theta_max_cur <= 1.1 * self.theta_min_bound
-            if is_at_floor:
-                floor_streak += 1
+            is_small_best = (best_angle <= self.bump_best_theta_thresh)
+            if is_small_best:
+                small_best_streak += 1
             else:
-                floor_streak = 0
+                small_best_streak = 0
 
             if (it >= self.bump_warmup
-                and floor_streak >= self.bump_floor_streak
+                and small_best_streak >= self.bump_streak
                 and bump_count < self.bump_max_per_image):
 
                 bump_count += 1
@@ -389,7 +391,7 @@ class Proposed_attack():
                 u_prev = None
                 x_e_prev = None
                 x_b_prev = None
-                floor_streak = 0
+                small_best_streak = 0
                 bump_log = (f'  [BUMP #{bump_count} θ_max→{math.degrees(self.bump_target):.2f}°]')
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
@@ -400,7 +402,7 @@ class Proposed_attack():
                           f'   inner_q={qs}' +
                           f'   θ_max={math.degrees(theta_max_cur):.1f}°' +
                           f'   best_θ={math.degrees(best_angle):.1f}°' +
-                          f'   flr_streak={floor_streak}' +
+                          f'   sml_streak={small_best_streak}' +
                           bump_log)
 
             norms.append(norm)
