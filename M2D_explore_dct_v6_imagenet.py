@@ -386,13 +386,15 @@ class Proposed_attack():
                 and small_best_streak >= self.bump_streak
                 and bump_count < self.bump_max_per_image):
 
+                # BUMP: halve current θ_max (clamped at bump_target as floor)
                 bump_count += 1
-                theta_max_cur = self.bump_target
+                new_theta = max(theta_max_cur / 2.0, self.bump_target)
+                theta_max_cur = new_theta
                 u_prev = None
                 x_e_prev = None
                 x_b_prev = None
                 small_best_streak = 0
-                bump_log = (f'  [BUMP #{bump_count} θ_max→{math.degrees(self.bump_target):.2f}°]')
+                bump_log = (f'  [BUMP #{bump_count} θ_max→{math.degrees(new_theta):.2f}°]')
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
