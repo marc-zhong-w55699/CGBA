@@ -43,13 +43,13 @@ class Proposed_attack():
                  shrink_factor=0.85,
                  shrink_thresh=0.15,
                  BS_iter=3,
-                 # ★ v6.4 reverse bump params (best_θ-based trigger)
+                 # ★ v6.4 reverse bump params (ImageNet-tuned: more aggressive cap)
                  bump_best_theta_thresh=math.pi / 180,  # trigger when 0 < best_θ ≤ this (= 1°)
                  bump_streak=2,                    # bump after K consecutive small (positive) best_θ iters
                  bump_target=math.pi / 360,        # halving floor; 0.5°
                  bump_cooldown=20,                 # min iters between consecutive bumps
                  bump_warmup=100,
-                 bump_max_per_image=50):
+                 bump_max_per_image=100):          # ★ 50 → 100 (5/40 imgs hit cap previously)
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()

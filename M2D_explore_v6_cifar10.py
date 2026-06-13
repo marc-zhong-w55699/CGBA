@@ -54,12 +54,12 @@ class Proposed_attack():
                  shrink_factor=0.85,
                  shrink_thresh=0.15,
                  BS_iter=3,
-                 # ★ v6.4 reverse bump params (best_θ-based trigger)
-                 bump_best_theta_thresh=math.pi / 180,  # trigger when 0 < best_θ ≤ this (= 1°)
-                 bump_streak=2,                # bump after K consecutive small (positive) best_θ iters
-                 bump_target=math.pi / 360,    # halving floor; π/360 = 0.5°
+                 # ★ v6.4 reverse bump params (CIFAR-tuned: conservative)
+                 bump_best_theta_thresh=math.pi / 360,  # ★ A: 1° → 0.5° (stricter "small")
+                 bump_streak=3,                # ★ A: 2 → 3 (need more consistent signal)
+                 bump_target=math.pi / 90,     # ★ B: 0.5° → 2° (= adaptive floor; bump becomes pure momentum reset)
                  bump_cooldown=20,             # min iters between consecutive bumps
-                 bump_warmup=100,              # earliest iter to allow bump
+                 bump_warmup=500,              # ★ A: 100 → 500 (skip exploration phase)
                  bump_max_per_image=50):       # safety cap on number of bumps per image
         self.model = model
         self.src_img = src_img
