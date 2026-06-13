@@ -44,9 +44,10 @@ class Proposed_attack():
                  shrink_thresh=0.15,
                  BS_iter=3,
                  # ★ v6.4 reverse bump params (best_θ-based trigger)
-                 bump_best_theta_thresh=math.pi / 180,  # trigger when best_θ ≤ this (= 1°)
-                 bump_streak=2,                    # bump after K consecutive small best_θ iters (5 → 2)
-                 bump_target=math.pi / 360,        # 0.5° (REVERSE bump)
+                 bump_best_theta_thresh=math.pi / 180,  # trigger when 0 < best_θ ≤ this (= 1°)
+                 bump_streak=2,                    # bump after K consecutive small (positive) best_θ iters
+                 bump_target=math.pi / 360,        # halving floor; 0.5°
+                 bump_cooldown=20,                 # min iters between consecutive bumps
                  bump_warmup=100,
                  bump_max_per_image=50):
         self.model = model
@@ -77,6 +78,7 @@ class Proposed_attack():
         self.bump_best_theta_thresh = bump_best_theta_thresh
         self.bump_streak            = bump_streak
         self.bump_target            = bump_target
+        self.bump_cooldown          = bump_cooldown
         self.bump_warmup            = bump_warmup
         self.bump_max_per_image     = bump_max_per_image
 
@@ -323,6 +325,7 @@ class Proposed_attack():
         # ★ v6.4 reverse bump state (best_θ-based)
         small_best_streak = 0
         bump_count        = 0
+        bump_cooldown_ctr = 0
 
         for it in range(outer_iter):
             diff = x_b - self.src_img
@@ -373,18 +376,23 @@ class Proposed_attack():
             norm = torch.norm(x_inv - x_adv_inv)
 
             # ============================================================
-            # ★ v6.4: reverse bump triggered by best_θ ≤ thresh
+            # ★ v6.4: reverse bump triggered by best_θ ∈ (0, thresh]
+            # (excludes sign-fail best_θ=0; respects cooldown between bumps)
             # ============================================================
             bump_log = ''
-            is_small_best = (best_angle <= self.bump_best_theta_thresh)
+            is_small_best = (0 < best_angle <= self.bump_best_theta_thresh)
             if is_small_best:
                 small_best_streak += 1
             else:
                 small_best_streak = 0
 
+            if bump_cooldown_ctr > 0:
+                bump_cooldown_ctr -= 1
+
             if (it >= self.bump_warmup
                 and small_best_streak >= self.bump_streak
-                and bump_count < self.bump_max_per_image):
+                and bump_count < self.bump_max_per_image
+                and bump_cooldown_ctr == 0):
 
                 # BUMP: halve current θ_max (clamped at bump_target as floor)
                 bump_count += 1
@@ -394,6 +402,7 @@ class Proposed_attack():
                 x_e_prev = None
                 x_b_prev = None
                 small_best_streak = 0
+                bump_cooldown_ctr = self.bump_cooldown
                 bump_log = (f'  [BUMP #{bump_count} θ_max→{math.degrees(new_theta):.2f}°]')
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
