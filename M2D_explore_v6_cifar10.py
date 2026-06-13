@@ -8,38 +8,50 @@ import math
 
 # ============================================================================
 # CIFAR-10 M2D-explore (λ=0.2,0.2,0.6) + v5b adaptive theta_max
-#                                       + v6.4 reverse floor-bump
+#                                       + v6.4 reverse bump (CIFAR-tuned)
 # Pure attack class. No DCT.
 #
-# v6.4 KEY: when adaptive θ_max stays at floor for ≥ N consecutive iters,
-# FORCE θ_max to a value SMALLER than the floor (a "reverse bump"). This
-# gives the next 2D step a tiny probe angle that's more likely to fit
-# inside the boundary's narrow adversarial sliver, then adaptive recovers.
+# v6.4 KEY: when best_θ stays small (≤ thresh, excluding sign-fail) for K
+# consecutive iters, halve current θ_max (clamped at bump_target as floor)
+# and clear momentum state. This gives the next 2D step a smaller probe
+# angle that fits inside the boundary's narrow adversarial sliver and
+# refreshes the direction proposal.
 #
-# Default config (current):
-#   theta_min_bound = π/90   (= 2°,   adaptive floor)
-#   bump_target     = π/360  (= 0.5°, reverse bump destination)
-#   bump_floor_streak = 10   (trigger after 10 consec floor iters)
+# Default config (CIFAR-tuned, conservative):
+#   theta_min_bound        = π/90   (= 2°,   adaptive floor)
+#   bump_best_theta_thresh = π/360  (= 0.5°, strict trigger)
+#   bump_streak            = 3      (consecutive small best_θ needed)
+#   bump_target            = π/180  (= 1°,   halving floor — 1 step below adaptive)
+#   bump_cooldown          = 20     (min iters between bumps)
+#   bump_warmup            = 500    (skip exploration phase)
+#   bump_max_per_image     = 50     (safety cap)
 #
-# Mechanism:
-#   if floor_streak >= bump_streak:
-#       theta_max_cur = bump_target    # 0.5°, BELOW the 2° floor
-#       u_prev, x_e_prev, x_b_prev = None, None, None   # fresh u
-#       floor_streak = 0
-#   # next 2D iter probes at 0.5°/4 = 0.125°  → high sign-success rate
-#   # then adaptive shrink clips back to theta_min_bound = 2°
+# Mechanism (per outer iter):
+#   is_small_best = (0 < best_angle ≤ bump_best_theta_thresh)  # excludes sign-fail
+#   if is_small_best:                small_best_streak += 1
+#   else:                            small_best_streak = 0
 #
-# Cost: ZERO extra queries. The bump iter spends fewer queries than usual
-# (because tiny probe angle ⇒ sign probe usually succeeds first try).
+#   if (it ≥ warmup
+#       and small_best_streak ≥ bump_streak
+#       and bump_count < cap
+#       and cooldown_ctr == 0):
+#       new_theta = max(theta_max_cur / 2, bump_target)
+#       theta_max_cur = new_theta
+#       u_prev = x_e_prev = x_b_prev = None    # fresh momentum
+#       small_best_streak = 0
+#       cooldown_ctr = bump_cooldown
 #
-# Why earlier escape mechanisms (v6.0-v6.3) failed:
+# Cost: ZERO extra queries. The bump iter actually saves queries (smaller
+# probe angle → higher sign-success rate, less fallback halving).
+#
+# Why earlier mechanisms (v6.0-v6.3) failed:
 #   * v6.0-v6.2 (forced radial shrink γr): jumps into narrow adv pocket → trap
-#   * v6.3 (1D ray, random direction in R^n): 0% success — at radius r on ViT
-#     the boundary doesn't admit random ambient-space directions
+#   * v6.3 (1D ray, random direction in R^n): 0% success
 #
-# v6.4 doesn't try to "escape" — it adapts the probe angle DOWN to match
-# the boundary's true geometric scale at small radii (where the swing
-# tolerance is well below 1° on ViT).
+# CIFAR vs ImageNet tuning rationale:
+#   * CIFAR ViT v5b is already near boundary-geometry limit → bumps too eager
+#     hurt convergence. We require stricter threshold (0.5° vs 1°), longer
+#     streak (3 vs 2), later warmup (500 vs 100), and shallower bump (1° vs 0.5°).
 # ============================================================================
 
 
@@ -57,7 +69,7 @@ class Proposed_attack():
                  # ★ v6.4 reverse bump params (CIFAR-tuned: conservative)
                  bump_best_theta_thresh=math.pi / 360,  # ★ A: 1° → 0.5° (stricter "small")
                  bump_streak=3,                # ★ A: 2 → 3 (need more consistent signal)
-                 bump_target=math.pi / 90,     # ★ B: 0.5° → 2° (= adaptive floor; bump becomes pure momentum reset)
+                 bump_target=math.pi / 180,    # ★ B': 1° (1 step below adaptive floor; sub-floor probe allowed for 1 iter)
                  bump_cooldown=20,             # min iters between consecutive bumps
                  bump_warmup=500,              # ★ A: 100 → 500 (skip exploration phase)
                  bump_max_per_image=50):       # safety cap on number of bumps per image
