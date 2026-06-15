@@ -27,7 +27,10 @@ import math
 #   bump_max_per_image     = 50     (safety cap)
 #
 # Mechanism (per outer iter):
-#   is_small_best = (0 < best_angle ≤ bump_best_theta_thresh)  # excludes sign-fail
+#   is_small_best = (
+#       (0 < best_angle ≤ bump_best_theta_thresh)           # (a) absolute small
+#       or (best_angle > 0 and theta_max_cur ≥ R × best_angle)  # (b) relative loose
+#   )                                                        # both exclude sign-fail
 #   if is_small_best:                small_best_streak += 1
 #   else:                            small_best_streak = 0
 #
@@ -67,12 +70,13 @@ class Proposed_attack():
                  shrink_thresh=0.15,
                  BS_iter=3,
                  # ★ v6.4 reverse bump params (CIFAR-tuned: conservative)
-                 bump_best_theta_thresh=math.pi / 180,  # ★ A: 1° → 0.5° (stricter "small")
-                 bump_streak=3,                # ★ A: 2 → 3 (need more consistent signal)
-                 bump_target=math.pi / 180,    # ★ B': 1° (1 step below adaptive floor; sub-floor probe allowed for 1 iter)
-                 bump_cooldown=20,             # min iters between consecutive bumps
-                 bump_warmup=500,              # ★ A: 100 → 500 (skip exploration phase)
-                 bump_max_per_image=50):       # safety cap on number of bumps per image
+                 bump_best_theta_thresh=math.pi / 180,  # absolute trigger: best_θ ≤ this (= 1°)
+                 bump_ratio_thresh=5.0,        # ★ NEW: ratio trigger — θ_max ≥ N × best_θ
+                 bump_streak=3,                # consecutive small/loose iters needed
+                 bump_target=math.pi / 180,    # ★ B': 1° (halving floor)
+                 bump_cooldown=20,             # min iters between bumps
+                 bump_warmup=500,              # earliest iter to allow bump
+                 bump_max_per_image=50):       # safety cap
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -98,6 +102,7 @@ class Proposed_attack():
 
         # ★ v6.4 reverse bump (best_θ-based)
         self.bump_best_theta_thresh = bump_best_theta_thresh
+        self.bump_ratio_thresh      = bump_ratio_thresh
         self.bump_streak            = bump_streak
         self.bump_target            = bump_target
         self.bump_cooldown          = bump_cooldown
@@ -370,11 +375,16 @@ class Proposed_attack():
             norm = torch.norm(x_inv - x_adv_inv)
 
             # ============================================================
-            # ★ v6.4: reverse bump triggered by best_θ ∈ (0, thresh]
-            # (excludes sign-fail best_θ=0; respects cooldown between bumps)
+            # ★ v6.4: reverse bump triggered by EITHER
+            #   (a) best_θ ∈ (0, bump_best_theta_thresh]      "absolute small"
+            #   (b) θ_max_cur ≥ bump_ratio_thresh × best_θ    "relative loose"
+            # (both clauses require best_θ > 0 to exclude sign-fail noise)
             # ============================================================
             bump_log = ''
-            is_small_best = (0 < best_angle <= self.bump_best_theta_thresh)
+            is_abs_small  = (0 < best_angle <= self.bump_best_theta_thresh)
+            is_rel_loose  = (best_angle > 0
+                             and theta_max_cur >= self.bump_ratio_thresh * best_angle)
+            is_small_best = is_abs_small or is_rel_loose
             if is_small_best:
                 small_best_streak += 1
             else:
