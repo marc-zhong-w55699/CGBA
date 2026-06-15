@@ -70,7 +70,7 @@ class Proposed_attack():
                  shrink_thresh=0.15,
                  BS_iter=3,
                  # ★ v6.4 reverse bump params (CIFAR-tuned: conservative)
-                 bump_best_theta_thresh=math.pi / 180,  # absolute trigger: best_θ ≤ this (= 1°)
+                 bump_best_theta_thresh=math.pi / 360,  # absolute trigger: best_θ ≤ this (= 1°)
                  bump_ratio_thresh=5.0,        # ★ NEW: ratio trigger — θ_max ≥ N × best_θ
                  bump_streak=3,                # consecutive small/loose iters needed
                  bump_target=math.pi / 180,    # ★ B': 1° (halving floor)
