@@ -67,7 +67,7 @@ class Proposed_attack():
                  shrink_thresh=0.15,
                  BS_iter=3,
                  # ★ v6.4 reverse bump params (CIFAR-tuned: conservative)
-                 bump_best_theta_thresh=math.pi / 360,  # ★ A: 1° → 0.5° (stricter "small")
+                 bump_best_theta_thresh=math.pi / 180,  # ★ A: 1° → 0.5° (stricter "small")
                  bump_streak=3,                # ★ A: 2 → 3 (need more consistent signal)
                  bump_target=math.pi / 180,    # ★ B': 1° (1 step below adaptive floor; sub-floor probe allowed for 1 iter)
                  bump_cooldown=20,             # min iters between consecutive bumps
