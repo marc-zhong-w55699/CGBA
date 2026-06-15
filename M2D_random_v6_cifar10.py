@@ -63,7 +63,7 @@ class Proposed_attack():
                  theta_min_bound=math.pi / 90,    # ★ v6.4: lowered from π/60 (3°) to π/90 (2°)
                  theta_max_bound=math.pi / 2,
                  grow_factor=1.15,
-                 shrink_factor=0.85,
+                 shrink_factor=0.95,
                  shrink_thresh=0.15,
                  BS_iter=3,
                  # ★ v6.4 reverse bump params (CIFAR-tuned: conservative)
