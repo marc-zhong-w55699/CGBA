@@ -7,26 +7,51 @@ import math
 
 
 # ============================================================================
-# CIFAR-10 M2D-random (λ=0,0,1) + v5b adaptive theta_max + v6 stuck escape.
+# CIFAR-10 M2D-random (λ=0,0,1) + v5b adaptive theta_max
+#                                       + v6.4 reverse bump (CIFAR-tuned)
 # Pure attack class. No DCT.
 #
-# v6 KEY ADDITION (vs v5):
-#   When 2D circular gets "stuck" in local region (norm shrink rate drops
-#   below threshold over a sliding window), trigger a FORCED RADIAL RESET:
-#     - Pick a chosen radius γ·r (γ < 1, e.g., 0.99) and a swing angle φ
-#       (e.g., φ = arccos(γ)) decoupled from boundary auto-shrink
-#     - Verify candidate point x_o + γr·(cos(φ)·v + s·sin(φ)·u) is adv
-#       (2 queries max for ±s)
-#     - On success: jump x_b deeper into adv interior, reset θ_max to π/3
-#       to give adaptive a chance to re-expand
-#     - On failure: cooldown a few iters, continue 2D
+# v6.4 KEY: when best_θ stays small (≤ thresh, excluding sign-fail) for K
+# consecutive iters, halve current θ_max (clamped at bump_target as floor)
+# and clear momentum state. This gives the next 2D step a smaller probe
+# angle that fits inside the boundary's narrow adversarial sliver and
+# refreshes the direction proposal.
 #
-# Stuck detection (sliding window):
-#     stuck := norm[-1] / norm[-W] > shrink_thresh
-#   where W = 30, shrink_thresh = 0.995 (less than 0.5% shrink over 30 iters)
+# Default config (CIFAR-tuned, conservative):
+#   theta_min_bound        = π/90   (= 2°,   adaptive floor)
+#   bump_best_theta_thresh = π/360  (= 0.5°, strict trigger)
+#   bump_streak            = 3      (consecutive small best_θ needed)
+#   bump_target            = π/180  (= 1°,   halving floor — 1 step below adaptive)
+#   bump_cooldown          = 20     (min iters between bumps)
+#   bump_warmup            = 500    (skip exploration phase)
+#   bump_max_per_image     = 50     (safety cap)
 #
-# Cost: 0-2 queries per stuck-trigger (much cheaper than restarting 2D)
-# Expected: -10~25% final norm on stuck-prone images (CIFAR ViT especially)
+# Mechanism (per outer iter):
+#   is_small_best = (0 < best_angle ≤ bump_best_theta_thresh)  # excludes sign-fail
+#   if is_small_best:                small_best_streak += 1
+#   else:                            small_best_streak = 0
+#
+#   if (it ≥ warmup
+#       and small_best_streak ≥ bump_streak
+#       and bump_count < cap
+#       and cooldown_ctr == 0):
+#       new_theta = max(theta_max_cur / 2, bump_target)
+#       theta_max_cur = new_theta
+#       u_prev = x_e_prev = x_b_prev = None    # fresh momentum
+#       small_best_streak = 0
+#       cooldown_ctr = bump_cooldown
+#
+# Cost: ZERO extra queries. The bump iter actually saves queries (smaller
+# probe angle → higher sign-success rate, less fallback halving).
+#
+# Why earlier mechanisms (v6.0-v6.3) failed:
+#   * v6.0-v6.2 (forced radial shrink γr): jumps into narrow adv pocket → trap
+#   * v6.3 (1D ray, random direction in R^n): 0% success
+#
+# CIFAR vs ImageNet tuning rationale:
+#   * CIFAR ViT v5b is already near boundary-geometry limit → bumps too eager
+#     hurt convergence. We require stricter threshold (0.5° vs 1°), longer
+#     streak (3 vs 2), later warmup (500 vs 100), and shallower bump (1° vs 0.5°).
 # ============================================================================
 
 
@@ -35,19 +60,19 @@ class Proposed_attack():
                  tar_img=None, iteration=1600, tol=1e-5, attack_method='manifold_search_2d',
                  verbose_control='Yes',
                  theta_max=math.pi / 3,
-                 theta_min_bound=math.pi / 60,
+                 theta_min_bound=math.pi / 90,    # ★ v6.4: lowered from π/60 (3°) to π/90 (2°)
                  theta_max_bound=math.pi / 2,
                  grow_factor=1.15,
                  shrink_factor=0.85,
                  shrink_thresh=0.15,
                  BS_iter=3,
-                 # ★ v6 escape params
-                 escape_window=30,            # W: norm sliding window size
-                 escape_shrink_thresh=0.995,  # norm[-1]/norm[-W] > this → stuck
-                 escape_cooldown=10,          # iters to wait after each trigger
-                 escape_gamma=0.99,           # forced radius factor (target shrink)
-                 escape_phi=None,             # swing angle; None → arccos(gamma)
-                 escape_warmup=100):          # don't trigger before this iter
+                 # ★ v6.4 reverse bump params (CIFAR-tuned: conservative)
+                 bump_best_theta_thresh=math.pi / 360,  # ★ A: 1° → 0.5° (stricter "small")
+                 bump_streak=3,                # ★ A: 2 → 3 (need more consistent signal)
+                 bump_target=math.pi / 180,    # ★ B': 1° (1 step below adaptive floor; sub-floor probe allowed for 1 iter)
+                 bump_cooldown=20,             # min iters between consecutive bumps
+                 bump_warmup=500,              # ★ A: 100 → 500 (skip exploration phase)
+                 bump_max_per_image=50):       # safety cap on number of bumps per image
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -71,13 +96,13 @@ class Proposed_attack():
         self.shrink_thresh = shrink_thresh
         self.BS_iter = BS_iter
 
-        # ★ v6 escape
-        self.escape_window = escape_window
-        self.escape_shrink_thresh = escape_shrink_thresh
-        self.escape_cooldown = escape_cooldown
-        self.escape_gamma = escape_gamma
-        self.escape_phi = escape_phi if escape_phi is not None else math.acos(escape_gamma)
-        self.escape_warmup = escape_warmup
+        # ★ v6.4 reverse bump (best_θ-based)
+        self.bump_best_theta_thresh = bump_best_theta_thresh
+        self.bump_streak            = bump_streak
+        self.bump_target            = bump_target
+        self.bump_cooldown          = bump_cooldown
+        self.bump_warmup            = bump_warmup
+        self.bump_max_per_image     = bump_max_per_image
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.all_queries = 0
@@ -255,73 +280,12 @@ class Proposed_attack():
 
 
 
-    # ============================================================================
-    # ★ v6 KEY: forced radial reset
-    # ============================================================================
-    def _forced_radial_reset(self, x_o, x_b, u_hint):
-        """
-        Stuck escape: pick a target radius gamma*r and swing angle phi,
-        verify if x_o + gamma*r * (cos(phi)*v + s*sin(phi)*u) is adversarial.
-        Returns (x_new, num_queries, success).
-
-        u_hint: current u proposal (will be projected ⊥ v and normalized).
-                Note: per analysis (random variant already diverse, stuck
-                signature direction-agnostic), the choice of u here matters
-                less than the gamma/phi commitment.
-        """
-        gamma = self.escape_gamma
-        phi = self.escape_phi
-
-        diff = x_b - x_o
-        r = torch.norm(diff)
-        if r < 1e-8:
-            return x_b, 0, False
-        v = diff / r
-
-        # Project u_hint onto v's orthogonal complement
-        u = u_hint - torch.dot(u_hint.reshape(-1), v.reshape(-1)) * v
-        u_norm = torch.norm(u)
-        if u_norm < 1e-8:
-            # Resample if u_hint collapses
-            u = torch.randn(x_o.shape).to(self.device)
-            u = u - torch.dot(u.reshape(-1), v.reshape(-1)) * v
-            u_norm = torch.norm(u)
-        u = u / u_norm
-
-        cos_p = math.cos(phi)
-        sin_p = math.sin(phi)
-        num_q = 0
-
-        # Try s = +1
-        x_cand = clip_image_values(
-            x_o + gamma * r * (v * cos_p + u * sin_p),
-            self.lb, self.ub
-        ).to(self.device)
-        num_q += 1
-        if self.is_adversarial(x_cand) == 1:
-            return x_cand, num_q, True
-
-        # Try s = -1
-        x_cand = clip_image_values(
-            x_o + gamma * r * (v * cos_p - u * sin_p),
-            self.lb, self.ub
-        ).to(self.device)
-        num_q += 1
-        if self.is_adversarial(x_cand) == 1:
-            return x_cand, num_q, True
-
-        # Both failed
-        return x_b, num_q, False
-
-
-
     def Attack(self):
         norms = []
         n_query = []
         grad = 0
         total_grad_queries     = 0
         total_boundary_queries = 0
-        total_escape_queries   = 0
 
         x_inv = self.inv_tf(copy.deepcopy(self.src_img.cpu()[0,:,:,:].squeeze()), self.mean, self.std)
         if self.tar_img == None:
@@ -348,18 +312,14 @@ class Proposed_attack():
         x_b_prev = None
         x_adv = x_b
 
-        # v5 adaptive theta_max state
+        # v5 adaptive theta_max
         theta_max_cur = self.theta_max
         theta_history = []
 
-        # ★ v6 escape state
-        cooldown_counter = 0
-        escape_attempts = 0
-        escape_success  = 0
-        last_escape_iter = -1
-
-        # Track norms in raw float for sliding window
-        norm_history = [float(norm_initial.item())]
+        # ★ v6.4 reverse bump state (best_θ-based)
+        small_best_streak = 0
+        bump_count        = 0
+        bump_cooldown_ctr = 0
 
         for it in range(outer_iter):
             diff = x_b - self.src_img
@@ -385,12 +345,11 @@ class Proposed_attack():
                 if u_new is None:
                     u_new = d3
 
-            # Standard 2D circular step
             x_adv, qs, best_angle = self.manifold_search_2d(
                 self.src_img, x_b, u=u_new, theta_max_cur=theta_max_cur
             )
 
-            # v5b adaptive theta_max update
+            # v5b adaptive theta_max
             if best_angle > 0:
                 if best_angle > 0.8 * theta_max_cur:
                     theta_max_cur = min(theta_max_cur * self.grow_factor, self.theta_max_bound)
@@ -409,69 +368,55 @@ class Proposed_attack():
 
             x_adv_inv = self.inv_tf(copy.deepcopy(x_adv.cpu()[0,:,:,:].squeeze()), self.mean, self.std)
             norm = torch.norm(x_inv - x_adv_inv)
-            norm_history.append(float(norm.item()))
 
             # ============================================================
-            # ★ v6: stuck detection + forced radial reset
+            # ★ v6.4: reverse bump triggered by best_θ ∈ (0, thresh]
+            # (excludes sign-fail best_θ=0; respects cooldown between bumps)
             # ============================================================
-            escape_log = ''
-            if (it >= self.escape_warmup
-                and cooldown_counter == 0
-                and len(norm_history) > self.escape_window):
+            bump_log = ''
+            is_small_best = (0 < best_angle <= self.bump_best_theta_thresh)
+            if is_small_best:
+                small_best_streak += 1
+            else:
+                small_best_streak = 0
 
-                recent_n = norm_history[-1]
-                past_n   = norm_history[-(self.escape_window + 1)]
-                if past_n > 0 and (recent_n / past_n) > self.escape_shrink_thresh:
-                    # STUCK: trigger forced radial reset
-                    escape_attempts += 1
-                    last_escape_iter = it
-                    x_new, qs_esc, success = self._forced_radial_reset(
-                        self.src_img, x_b, u_hint=u_new
-                    )
-                    q_num += qs_esc
-                    total_escape_queries += qs_esc
+            # cooldown countdown
+            if bump_cooldown_ctr > 0:
+                bump_cooldown_ctr -= 1
 
-                    if success:
-                        escape_success += 1
-                        # Recompute norm after jump
-                        x_new_inv = self.inv_tf(copy.deepcopy(x_new.cpu()[0,:,:,:].squeeze()), self.mean, self.std)
-                        new_norm = torch.norm(x_inv - x_new_inv)
-                        norm_history[-1] = float(new_norm.item())   # update last
-                        x_b = x_new
-                        x_adv = x_new
-                        norm = new_norm
-                        # Reset adaptive theta_max to give it room to re-expand
-                        theta_max_cur = self.theta_max
-                        # Clear u_prev/x_e_prev — they're stale after reset
-                        u_prev = None
-                        x_e_prev = None
-                        x_b_prev = None
-                        escape_log = f'  [ESCAPE✓ q={qs_esc} r:{past_n:.3f}→{recent_n:.3f}→{float(new_norm.item()):.3f}]'
-                    else:
-                        escape_log = f'  [ESCAPE✗ q={qs_esc}]'
+            if (it >= self.bump_warmup
+                and small_best_streak >= self.bump_streak
+                and bump_count < self.bump_max_per_image
+                and bump_cooldown_ctr == 0):
 
-                    cooldown_counter = self.escape_cooldown
-            elif cooldown_counter > 0:
-                cooldown_counter -= 1
+                # BUMP: halve current θ_max (clamped at bump_target as floor), clear momentum
+                bump_count += 1
+                new_theta = max(theta_max_cur / 2.0, self.bump_target)
+                theta_max_cur = new_theta
+                u_prev = None
+                x_e_prev = None
+                x_b_prev = None
+                small_best_streak = 0
+                bump_cooldown_ctr = self.bump_cooldown
+                bump_log = (f'  [BUMP #{bump_count} θ_max→{math.degrees(new_theta):.2f}°]')
 
-            if it % 50 == 0 or it == outer_iter - 1 or escape_log:
+            if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v6 iter -> ' + str(it) +
+                    print('Manifold2D-v6.4-random-bump iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
                           f'   θ_max={math.degrees(theta_max_cur):.1f}°' +
                           f'   best_θ={math.degrees(best_angle):.1f}°' +
-                          escape_log)
+                          f'   sml_streak={small_best_streak}' +
+                          bump_log)
 
             norms.append(norm)
             n_query.append(q_num)
 
-        # Final summary
         print(f'\n── Query num ──────────────────────────────────')
         print(f'Gradient estimation queries : {total_grad_queries}')
         print(f'Boundary search queries     : {total_boundary_queries}')
-        print(f'Escape queries              : {total_escape_queries}')
         print(f'Total queries               : {q_num}')
         if theta_history:
             print(f'θ_max trajectory: init={math.degrees(theta_history[0]):.1f}°, '
@@ -479,8 +424,7 @@ class Proposed_attack():
                   f'mean={math.degrees(np.mean(theta_history)):.1f}°, '
                   f'min={math.degrees(min(theta_history)):.1f}°, '
                   f'max={math.degrees(max(theta_history)):.1f}°')
-        print(f'Escape stats: attempts={escape_attempts}, success={escape_success}'
-              + (f' ({100*escape_success/escape_attempts:.1f}% success rate)' if escape_attempts > 0 else ''))
+        print(f'Bump count: {bump_count}/{self.bump_max_per_image}')
         print(f'────────────────────────────────────────────────')
 
         x_adv = clip_image_values(x_adv, self.lb, self.ub)
