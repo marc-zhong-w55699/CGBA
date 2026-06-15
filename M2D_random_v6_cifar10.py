@@ -62,7 +62,7 @@ class Proposed_attack():
                  theta_max=math.pi / 3,
                  theta_min_bound=math.pi / 90,    # ★ v6.4: lowered from π/60 (3°) to π/90 (2°)
                  theta_max_bound=math.pi / 2,
-                 grow_factor=1.2,
+                 grow_factor=1.1,
                  shrink_factor=0.85,
                  shrink_thresh=0.15,
                  BS_iter=3,
