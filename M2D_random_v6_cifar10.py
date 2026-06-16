@@ -37,12 +37,16 @@ import math
 #   if (it ≥ warmup
 #       and small_best_streak ≥ bump_streak
 #       and bump_count < cap
-#       and cooldown_ctr == 0):
+#       and cooldown_ctr == 0
+#       and norm_cur / norm_init ≥ bump_norm_gate):   # ★ A: image-aware gate
 #       new_theta = max(theta_max_cur / 2, bump_target)
 #       theta_max_cur = new_theta
 #       u_prev = x_e_prev = x_b_prev = None    # fresh momentum
 #       small_best_streak = 0
 #       cooldown_ctr = bump_cooldown
+#
+# The norm_gate prevents bump on already-converged images where v5b's
+# adaptive trajectory is already near-optimal.
 #
 # Cost: ZERO extra queries. The bump iter actually saves queries (smaller
 # probe angle → higher sign-success rate, less fallback halving).
@@ -109,6 +113,7 @@ class Proposed_attack():
         self.bump_cooldown          = bump_cooldown
         self.bump_warmup            = bump_warmup
         self.bump_max_per_image     = bump_max_per_image
+        self.bump_norm_gate         = bump_norm_gate
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.all_queries = 0
@@ -395,10 +400,15 @@ class Proposed_attack():
             if bump_cooldown_ctr > 0:
                 bump_cooldown_ctr -= 1
 
+            # ★ A: image-aware gate — don't bump if image already mostly converged
+            norm_ratio = float(norm.item()) / max(float(norm_initial.item()), 1e-12)
+            gate_ok = (norm_ratio >= self.bump_norm_gate)
+
             if (it >= self.bump_warmup
                 and small_best_streak >= self.bump_streak
                 and bump_count < self.bump_max_per_image
-                and bump_cooldown_ctr == 0):
+                and bump_cooldown_ctr == 0
+                and gate_ok):
 
                 # BUMP: halve current θ_max (clamped at bump_target as floor), clear momentum
                 bump_count += 1
@@ -409,7 +419,7 @@ class Proposed_attack():
                 x_b_prev = None
                 small_best_streak = 0
                 bump_cooldown_ctr = self.bump_cooldown
-                bump_log = (f'  [BUMP #{bump_count} θ_max→{math.degrees(new_theta):.2f}°]')
+                bump_log = (f'  [BUMP #{bump_count} θ_max→{math.degrees(new_theta):.2f}° r/r₀={norm_ratio:.2f}]')
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
