@@ -76,7 +76,8 @@ class Proposed_attack():
                  bump_target=math.pi / 180,    # ★ B': 1° (halving floor)
                  bump_cooldown=50,             # min iters between bumps
                  bump_warmup=500,              # earliest iter to allow bump
-                 bump_max_per_image=50):       # safety cap
+                 bump_max_per_image=50,        # safety cap
+                 bump_norm_gate=0.5):          # ★ A: only bump when norm_cur ≥ norm_init × this
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
