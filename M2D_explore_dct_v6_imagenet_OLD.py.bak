@@ -36,22 +36,20 @@ class Proposed_attack():
                  tar_img=None, iteration=700, tol=1e-5, attack_method='manifold_search_2d',
                  verbose_control='Yes',
                  dct_ratio=1.0/8,
-                 theta_max=math.pi / 3.6,         # ★ v6.5 TEST: 50° init (was 60°)
-                 theta_min_bound=math.pi / 90,    # 2°
-                 theta_max_bound=math.pi / 3,     # ★ v6.5 TEST: 60° cap (was 90°)
+                 theta_max=math.pi / 3,
+                 theta_min_bound=math.pi / 90,    # ★ v6.4: 2° (lowered from π/180)
+                 theta_max_bound=math.pi / 2,
                  grow_factor=1.15,
                  shrink_factor=0.85,
                  shrink_thresh=0.15,
                  BS_iter=3,
-                 # ★ v6.4 reverse bump params (ImageNet-tuned, with new mechanisms)
-                 bump_best_theta_thresh=math.pi / 180,  # 1° (ImageNet best_θ P50 ≈ 1°)
-                 bump_ratio_thresh=5.0,            # ★ v6.5 TEST: ratio trigger θ_max ≥ N×best_θ
-                 bump_streak=2,                    # ImageNet: 2 (faster than CIFAR's 3)
-                 bump_target=math.pi / 360,        # 0.5° (deeper bump than CIFAR's 1°)
-                 bump_cooldown=50,                 # ImageNet: 20 (shorter than CIFAR's 50)
-                 bump_warmup=100,                  # ImageNet: 100 (earlier than CIFAR's 500)
-                 bump_max_per_image=100,
-                 bump_norm_gate=0.0):              # ★ v6.5 TEST: 0 = always on (ImageNet needs bump)
+                 # ★ v6.4 reverse bump params (ImageNet-tuned: more aggressive cap)
+                 bump_best_theta_thresh=math.pi / 180,  # trigger when 0 < best_θ ≤ this (= 1°)
+                 bump_streak=2,                    # bump after K consecutive small (positive) best_θ iters
+                 bump_target=math.pi / 360,        # halving floor; 0.5°
+                 bump_cooldown=20,                 # min iters between consecutive bumps
+                 bump_warmup=100,
+                 bump_max_per_image=100):          # ★ 50 → 100 (5/40 imgs hit cap previously)
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -78,13 +76,11 @@ class Proposed_attack():
 
         # ★ v6.4 reverse bump (best_θ-based)
         self.bump_best_theta_thresh = bump_best_theta_thresh
-        self.bump_ratio_thresh      = bump_ratio_thresh
         self.bump_streak            = bump_streak
         self.bump_target            = bump_target
         self.bump_cooldown          = bump_cooldown
         self.bump_warmup            = bump_warmup
         self.bump_max_per_image     = bump_max_per_image
-        self.bump_norm_gate         = bump_norm_gate
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.all_queries = 0
@@ -380,16 +376,11 @@ class Proposed_attack():
             norm = torch.norm(x_inv - x_adv_inv)
 
             # ============================================================
-            # ★ v6.4: reverse bump triggered by EITHER
-            #   (a) best_θ ∈ (0, bump_best_theta_thresh]      "absolute small"
-            #   (b) θ_max_cur ≥ bump_ratio_thresh × best_θ    "relative loose"
-            # (both clauses exclude sign-fail; gated by norm_cur/norm_init)
+            # ★ v6.4: reverse bump triggered by best_θ ∈ (0, thresh]
+            # (excludes sign-fail best_θ=0; respects cooldown between bumps)
             # ============================================================
             bump_log = ''
-            is_abs_small  = (0 < best_angle <= self.bump_best_theta_thresh)
-            is_rel_loose  = (best_angle > 0
-                             and theta_max_cur >= self.bump_ratio_thresh * best_angle)
-            is_small_best = is_abs_small or is_rel_loose
+            is_small_best = (0 < best_angle <= self.bump_best_theta_thresh)
             if is_small_best:
                 small_best_streak += 1
             else:
@@ -398,15 +389,10 @@ class Proposed_attack():
             if bump_cooldown_ctr > 0:
                 bump_cooldown_ctr -= 1
 
-            # ★ A: image-aware gate — don't bump if image already mostly converged
-            norm_ratio = float(norm.item()) / max(float(norm_initial.item()), 1e-12)
-            gate_ok = (norm_ratio >= self.bump_norm_gate)
-
             if (it >= self.bump_warmup
                 and small_best_streak >= self.bump_streak
                 and bump_count < self.bump_max_per_image
-                and bump_cooldown_ctr == 0
-                and gate_ok):
+                and bump_cooldown_ctr == 0):
 
                 # BUMP: halve current θ_max (clamped at bump_target as floor)
                 bump_count += 1
@@ -417,11 +403,11 @@ class Proposed_attack():
                 x_b_prev = None
                 small_best_streak = 0
                 bump_cooldown_ctr = self.bump_cooldown
-                bump_log = (f'  [BUMP #{bump_count} θ_max→{math.degrees(new_theta):.2f}° r/r₀={norm_ratio:.2f}]')
+                bump_log = (f'  [BUMP #{bump_count} θ_max→{math.degrees(new_theta):.2f}°]')
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v6.4-explore-dct-bump iter -> ' + str(it) +
+                    print('Manifold2D-v6.4-explore-dct iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
