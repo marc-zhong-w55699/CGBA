@@ -68,7 +68,7 @@ class Proposed_attack():
                  grow_factor=1.15,
                  shrink_factor=0.85,
                  shrink_thresh=0.15,
-                 BS_iter=2,
+                 BS_iter=4,
                  # ★ v6.4 reverse bump params (CIFAR-tuned: conservative)
                  bump_best_theta_thresh=math.pi / 360,  # absolute trigger: best_θ ≤ this (= 1°)
                  bump_ratio_thresh=5.0,        # ★ NEW: ratio trigger — θ_max ≥ N × best_θ
