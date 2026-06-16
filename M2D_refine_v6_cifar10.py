@@ -7,7 +7,7 @@ import math
 
 
 # ============================================================================
-# CIFAR-10 M2D-explore (λ=0.2,0.2,0.6) + v5b adaptive theta_max
+# CIFAR-10 M2D-refine (λ=0.3,0.5,0.2) + v5b adaptive theta_max
 #                                       + v6.4 reverse bump (CIFAR-tuned)
 # Pure attack class. No DCT.
 #
@@ -316,7 +316,7 @@ class Proposed_attack():
         size = self.src_img.shape
 
         outer_iter = self.iteration
-        lam1, lam2, lam3 = 0.2, 0.2, 0.6      # ★ explore
+        lam1, lam2, lam3 = 0.3, 0.5, 0.2      # ★ refine
 
         u_prev = None
         x_e_prev = None
@@ -423,7 +423,7 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v6.4-explore-bump iter -> ' + str(it) +
+                    print('Manifold2D-v6.4-refine-bump iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
