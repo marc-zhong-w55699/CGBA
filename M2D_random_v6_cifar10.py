@@ -62,7 +62,7 @@ class Proposed_attack():
     def __init__(self, model, src_img, mean, std, lb, ub, dim_reduc_factor=4,
                  tar_img=None, iteration=1600, tol=1e-5, attack_method='manifold_search_2d',
                  verbose_control='Yes',
-                 theta_max=math.pi / 3.6,
+                 theta_max=math.pi / 4,
                  theta_min_bound=math.pi / 90,    # ★ v6.4: lowered from π/60 (3°) to π/90 (2°)
                  theta_max_bound=math.pi / 3,
                  grow_factor=1.15,
