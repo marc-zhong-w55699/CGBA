@@ -62,13 +62,13 @@ class Proposed_attack():
     def __init__(self, model, src_img, mean, std, lb, ub, dim_reduc_factor=4,
                  tar_img=None, iteration=1600, tol=1e-5, attack_method='manifold_search_2d',
                  verbose_control='Yes',
-                 theta_max=math.pi / 3,
+                 theta_max=math.pi / 3.6,
                  theta_min_bound=math.pi / 90,    # ★ v6.4: lowered from π/60 (3°) to π/90 (2°)
                  theta_max_bound=math.pi / 2,
                  grow_factor=1.15,
                  shrink_factor=0.85,
                  shrink_thresh=0.15,
-                 BS_iter=4,
+                 BS_iter=3,
                  # ★ v6.4 reverse bump params (CIFAR-tuned: conservative)
                  bump_best_theta_thresh=math.pi / 360,  # absolute trigger: best_θ ≤ this (= 1°)
                  bump_ratio_thresh=5.0,        # ★ NEW: ratio trigger — θ_max ≥ N × best_θ
