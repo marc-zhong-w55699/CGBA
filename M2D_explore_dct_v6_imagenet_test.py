@@ -48,7 +48,7 @@ class Proposed_attack():
                  bump_ratio_thresh=5.0,            # ★ v6.5 TEST: ratio trigger θ_max ≥ N×best_θ
                  bump_streak=2,                    # ImageNet: 2 (faster than CIFAR's 3)
                  bump_target=math.pi / 360,        # 0.5° (deeper bump than CIFAR's 1°)
-                 bump_cooldown=20,                 # ImageNet: 20 (shorter than CIFAR's 50)
+                 bump_cooldown=50,                 # ImageNet: 20 (shorter than CIFAR's 50)
                  bump_warmup=100,                  # ImageNet: 100 (earlier than CIFAR's 500)
                  bump_max_per_image=100,
                  bump_norm_gate=0.0):              # ★ v6.5 TEST: 0 = always on (ImageNet needs bump)
