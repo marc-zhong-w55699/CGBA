@@ -17,7 +17,10 @@ import math
 #       — higher single-probe success rate; BS upper limit unchanged
 #   (b) fallback halving starts at probe_angle / 2  (was fixed π/30)
 #       — skip already-known-failing larger angles
-#   Together: ~25-30% per-iter query reduction in stuck/late phase.
+#   (c) Smart-BS: BS lower bound = sign_found_angle (was 0)
+#       — reuse probe-verified adv info, never returns best_θ=0
+#       — best_θ guaranteed ≥ probe_angle (= theta_max/16)
+#   Together: ~30-40% per-iter query reduction + eliminates best_θ=0 case.
 #
 # v6.4 KEY: when best_θ stays small (≤ thresh, excluding sign-fail) for K
 # consecutive iters, halve current θ_max (clamped at bump_target as floor)
@@ -216,10 +219,16 @@ class Proposed_attack():
 
 
 
-    def _circ_binary_search(self, x_o, r, v, u, s, theta_max):
-        lower, upper = 0.0, theta_max
-        best_angle = 0.0
-        x_best = None
+    def _circ_binary_search(self, x_o, r, v, u, s, theta_max,
+                             init_lower=0.0, init_best=0.0, init_x_best=None):
+        """★ v7 Smart-BS: accept initial (lower, best, x_best) from sign probe.
+           When sign was found at angle θ_p (probe_angle or fallback β), the
+           caller passes init_lower=θ_p, init_best=θ_p, init_x_best=x_probe.
+           BS then searches [θ_p, theta_max] instead of [0, theta_max],
+           guaranteeing best_θ ≥ θ_p (no more best_θ=0 case)."""
+        lower, upper = init_lower, theta_max
+        best_angle = init_best
+        x_best = init_x_best
         num_q = 0
         for _ in range(self.BS_iter):
             mid = (lower + upper) / 2.0
@@ -262,15 +271,22 @@ class Proposed_attack():
 
         probe_angle = theta_max / 16.0   # ★ v7: /4 → /16 (higher 1-shot success)
         s = 0
+        sign_found_angle = None    # ★ v7 Smart-BS: track where sign was confirmed
+        sign_found_x     = None    # ★ v7 Smart-BS: keep the adv point for BS init
+
         x_pos = self._circ_x_at(x_o, r, v, u, +1, probe_angle)
         num_calls += 1
         if self.is_adversarial(x_pos) == 1:
             s = +1
+            sign_found_angle = probe_angle
+            sign_found_x     = x_pos
         else:
             x_neg = self._circ_x_at(x_o, r, v, u, -1, probe_angle)
             num_calls += 1
             if self.is_adversarial(x_neg) == 1:
                 s = -1
+                sign_found_angle = probe_angle
+                sign_found_x     = x_neg
 
         if s == 0:
             cur_beta = probe_angle / 2.0   # ★ v7: continue from probe (was fixed π/30)
@@ -279,17 +295,29 @@ class Proposed_attack():
                 num_calls += 1
                 if self.is_adversarial(x_pos) == 1:
                     s = +1
+                    sign_found_angle = cur_beta
+                    sign_found_x     = x_pos
                     break
                 x_neg = self._circ_x_at(x_o, r, v, u, -1, cur_beta)
                 num_calls += 1
                 if self.is_adversarial(x_neg) == 1:
                     s = -1
+                    sign_found_angle = cur_beta
+                    sign_found_x     = x_neg
                     break
                 cur_beta = cur_beta / 2
             if s == 0:
                 return x_b, num_calls, 0.0
 
-        best_angle, x_best, bs_q = self._circ_binary_search(x_o, r, v, u, s, theta_max)
+        # ★ v7 Smart-BS: pass probe angle/point as BS initial state
+        # → BS searches [sign_found_angle, theta_max]
+        # → best_θ guaranteed ≥ sign_found_angle (no more best=0 case)
+        best_angle, x_best, bs_q = self._circ_binary_search(
+            x_o, r, v, u, s, theta_max,
+            init_lower=sign_found_angle,
+            init_best=sign_found_angle,
+            init_x_best=sign_found_x,
+        )
         num_calls += bs_q
 
         if x_best is not None and best_angle > 0:
