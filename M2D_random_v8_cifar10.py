@@ -279,7 +279,7 @@ class Proposed_attack():
         num_q      = 0
 
         θ_cur = init_angle
-        δ     = init_angle * 2.0    # initial increment = 2 × probe
+        δ     = init_angle * 4.0    # initial increment = 2 × probe
 
         while True:
             θ_next = θ_cur + δ
