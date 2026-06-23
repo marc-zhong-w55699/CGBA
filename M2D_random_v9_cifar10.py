@@ -133,7 +133,7 @@ class Proposed_attack():
                  bump_norm_gate=0.5,           # ★ A: only bump when norm_cur ≥ norm_init × this
                  # ★ v9 line search params (geometric shrink)
                  ls_gamma=0.9,                 # shrink factor per step
-                 ls_max_calls=3):              # max shrink steps (actual may be less)
+                 ls_max_calls=2):              # max shrink steps (actual may be less)
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -339,7 +339,7 @@ class Proposed_attack():
         num_q      = 0
 
         θ_cur = init_angle
-        δ     = init_angle * 2.0    # initial increment = 2 × probe
+        δ     = init_angle * 4.0    # initial increment = 2 × probe
 
         while True:
             θ_next = θ_cur + δ
