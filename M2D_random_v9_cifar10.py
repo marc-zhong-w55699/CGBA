@@ -16,7 +16,7 @@ import math
 #
 # ★ v8 inherited: increment-doubling walk replaces BS (clean, no refine).
 #
-# ★ v9 KEY CHANGE: ADD LINE SEARCH on (x_o → x_new) after walk.
+# ★ v9 KEY CHANGE: ADD GEOMETRIC-SHRINK LINE SEARCH on (x_o → x_new).
 #
 # Motivation:
 #   M2D's 2D circular evolution constrains x_new to the Thales circle of
@@ -26,19 +26,28 @@ import math
 #
 #   Algorithm (per outer iter):
 #     1) M2D 2D walk → x_new on Thales circle at r·cos(θ_best) from x_o
-#     2) bin_search(x_o, x_new, max_calls=K) → x_new' closer to x_o
-#        (K=3 by default; ~3 queries per iter overhead)
+#     2) γ-decay shrink: try x_o + γ·(x_new - x_o), 0 < γ < 1.
+#        If adv: keep, recurse. If fail: stop.
+#        Cost: 1 to K queries (variable, typically 2 on ViT smooth boundary)
 #
 #   Geometric gain:
-#     r_new(v8)  = r · cos(θ_best)               ← Thales cap
-#     r_new(v9)  = α · r · cos(θ_best),  α ≤ 1   ← line search shrinks
-#     α depends on boundary curvature along d_new:
-#       - Smooth boundary: α ≈ 1 (line search useless)
-#       - Irregular boundary: α can be 0.5-0.9 (large gain)
+#     r_new(v8)  = r · cos(θ_best)                ← Thales cap
+#     r_new(v9)  = γ^k · r · cos(θ_best)          ← γ=0.9, k = successful shrinks
 #
-# Cost: +K queries per iter (K=3 default).
-#   At inner_q ≈ 3.69 (v8 baseline) + 3 = ~6.7 inner_q
-#   At 10000 query budget → ~1500 outer iters (vs v8's ~2800)
+#   Why γ-decay beats BS on smooth boundary (α high, common in ViT):
+#     - BS K=3 starts at midpoint (0.5×): often fails (α > 0.5) → next 0.75
+#       → may fail → r unchanged with 3 q wasted.
+#     - γ=0.9 starts close to x_new: succeeds when α > 0.9 (likely for ViT)
+#       → r drops 10% with 2 q.
+#
+# Cost: variable per iter, depends on K_max and γ.
+#   Default γ=0.9, K_max=3:
+#     - α > 0.9: 2 q, r×0.9
+#     - α ∈ [0.81, 0.9]: 2 q, r×0.9
+#     - α < 0.729: 3 q (hit K_max), r×0.729
+#   Average ~2.4 q/iter on ViT
+#   Total inner_q ≈ 3.69 (v8) + 2.4 = ~6.1
+#   At 10000 budget → ~1640 iters
 #
 # Why v9 may beat v7/v8 (0.221/0.223):
 #   - Early phase: boundaries vary a lot → α << 1 → huge gain per iter
@@ -122,8 +131,9 @@ class Proposed_attack():
                  bump_warmup=500,              # earliest iter to allow bump
                  bump_max_per_image=50,        # safety cap
                  bump_norm_gate=0.5,           # ★ A: only bump when norm_cur ≥ norm_init × this
-                 # ★ v9 line search params
-                 ls_max_calls=1):              # BS steps along (x_o → x_new) per iter
+                 # ★ v9 line search params (geometric shrink)
+                 ls_gamma=0.9,                 # shrink factor per step
+                 ls_max_calls=3):              # max shrink steps (actual may be less)
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -157,7 +167,8 @@ class Proposed_attack():
         self.bump_max_per_image     = bump_max_per_image
         self.bump_norm_gate         = bump_norm_gate
 
-        # ★ v9 line search
+        # ★ v9 line search (geometric shrink)
+        self.ls_gamma     = ls_gamma
         self.ls_max_calls = ls_max_calls
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -232,6 +243,35 @@ class Proposed_attack():
             if torch.norm(adv-cln).cpu().numpy() < self.tol or num_calls >= max_calls:
                 break
         return adv, num_calls
+
+
+
+    def _line_shrink(self, x_o, x_adv, gamma, max_calls):
+        """★ v9 line search via geometric shrink (γ-decay).
+
+           Each step tries `best ← x_o + γ·(best - x_o)`. If adv, keep;
+           else stop. Cost: 1 to max_calls queries.
+
+           Compared to BS:
+             - High-α boundary (smooth): finds 10% r-reduction in ~2 q
+               (vs BS's K queries that may find nothing)
+             - Low-α (irregular): less precise than BS, but still pushes
+               r down by γ^max_calls in worst case
+
+           ViT 边界平滑，γ=0.9 期望 inner_q +2.4 而非 +3.
+        """
+        num_calls = 0
+        best = x_adv
+        for _ in range(max_calls):
+            candidate = clip_image_values(
+                x_o + gamma * (best - x_o), self.lb, self.ub
+            ).to(self.device)
+            num_calls += 1
+            if self.is_adversarial(candidate) == 1:
+                best = candidate
+            else:
+                break    # boundary reached
+        return best, num_calls
 
 
 
@@ -475,12 +515,16 @@ class Proposed_attack():
                 self.src_img, x_b, u=u_new, theta_max_cur=theta_max_cur,
             )
 
-            # ★ v9: line search along (x_o → x_new) to shrink r below Thales cap
-            # Only when M2D actually moved (best_angle > 0 means new adv found)
+            # ★ v9: geometric shrink along (x_o → x_new) to push r below Thales cap.
+            # Each step: best ← x_o + γ·(best - x_o), stop on first non-adv.
+            # On smooth boundaries (ViT, α high) avg ~2 q, finds 10% r reduction
+            # where BS would have wasted 3 q for 0 gain.
             ls_q = 0
             if best_angle > 0:
-                x_adv, ls_q = self.bin_search(
-                    self.src_img, x_adv, max_calls=self.ls_max_calls
+                x_adv, ls_q = self._line_shrink(
+                    self.src_img, x_adv,
+                    gamma=self.ls_gamma,
+                    max_calls=self.ls_max_calls,
                 )
             qs += ls_q
 
