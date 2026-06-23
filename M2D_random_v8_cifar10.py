@@ -255,27 +255,29 @@ class Proposed_attack():
 
 
     def _circ_inc_walk(self, x_o, r, v, u, s, theta_safety_cap,
-                        init_angle, init_x, theta_max_cur=None):
-        """★ v8 INCREMENT-DOUBLING WALK (replaces BS).
+                        init_angle, init_x):
+        """★ v8 INCREMENT-DOUBLING WALK + 1-STEP BS REFINE.
 
            Start from sign-verified (init_angle, init_x). Each step, advance
            by an increment δ that doubles after each successful test. Stop
-           when next angle is non-adv or hits theta_safety_cap.
+           when next angle is non-adv (boundary) or hits theta_safety_cap.
 
-           ★ v8b: δ_init = max(2 × probe, θ_max_cur / 4)
-              Probe was kept small (θ_max/16) for sign-success rate, but
-              empirically best_θ / probe ≈ 6× (median), so walk wasted ~2
-              steps climbing. Boosting δ_init to ~θ_max/4 lets walk reach
-              the typical best_θ range in 1-2 steps.
+           ★ v8 refine: when walk breaks due to boundary (not safety cap),
+              we have bracket [θ_lo=best_angle, θ_hi=fail_angle]. Test the
+              midpoint with 1 extra query. If adv → best_angle = mid.
+              Expected gap reduction: (θ_hi-θ_lo)/2 → (θ_hi-θ_lo)/4.
 
-           Sequence (initial increment = δ_init):
+           Why this helps especially on SMOOTH boundaries: walk's gap grows
+           geometrically — k successful steps yield gap = δ_init × 2^k. The
+           smoother the boundary (more walk steps fit), the LARGER the gap,
+           the MORE refine recovers in absolute terms.
+
+           Sequence:
               θ_0 = init_angle             ← probe (sign-verified)
-              θ_1 = θ_0 + δ_init
-              θ_2 = θ_1 + 2·δ_init
-              θ_k = θ_0 + δ_init × (2^k - 1)
-
-           No refine — single-iter precision matters less than per-iter cost
-           savings (boundary varies across iters anyway).
+              θ_1 = θ_0 + δ                (δ = 2 × init_angle)
+              θ_2 = θ_1 + 2·δ
+              θ_k = θ_0 + δ × (2^k - 1)
+              [refine: test (θ_lo + θ_hi)/2]
 
            Returns (best_angle, x_best, num_queries).
         """
@@ -284,14 +286,13 @@ class Proposed_attack():
         num_q      = 0
 
         θ_cur = init_angle
-        # ★ v8b: floor δ_init at θ_max_cur/4 to avoid tiny first step
-        δ_min = (theta_max_cur / 4.0) if theta_max_cur is not None else 0.0
-        δ     = max(init_angle * 2.0, δ_min)
+        δ     = init_angle * 2.0    # initial increment = 2 × probe
+        fail_angle = None            # ★ track first non-adv for refine
 
         while True:
             θ_next = θ_cur + δ
             if θ_next >= theta_safety_cap:
-                break    # 撞 safety cap
+                break    # safety cap (no boundary info, no refine)
 
             x_test = self._circ_x_at(x_o, r, v, u, s, θ_next)
             num_q += 1
@@ -302,7 +303,17 @@ class Proposed_attack():
                 θ_cur      = θ_next
                 δ         *= 2.0    # increment doubles
             else:
-                break    # 撞 boundary
+                fail_angle = θ_next  # ★ found boundary
+                break
+
+        # ★ v8 1-step BS refine in [best_angle, fail_angle]
+        if fail_angle is not None and best_angle < fail_angle:
+            mid = (best_angle + fail_angle) / 2.0
+            x_mid = self._circ_x_at(x_o, r, v, u, s, mid)
+            num_q += 1
+            if self.is_adversarial(x_mid) == 1:
+                best_angle = mid
+                x_best     = x_mid
 
         return best_angle, x_best, num_q
 
@@ -383,7 +394,6 @@ class Proposed_attack():
             theta_safety_cap=self.theta_max_bound,
             init_angle=sign_found_angle,
             init_x=sign_found_x,
-            theta_max_cur=theta_max,         # ★ v8b: δ_init floor = θ_max/4
         )
         num_calls += walk_q
 
@@ -460,7 +470,7 @@ class Proposed_attack():
                     u_new = d3
 
             x_adv, qs, best_angle = self.manifold_search_2d(
-                self.src_img, x_b, u=u_new, theta_max_cur=theta_max_cur
+                self.src_img, x_b, u=u_new, theta_max_cur=theta_max_cur,
             )
 
             # v5b adaptive theta_max
@@ -526,7 +536,7 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v8b-random-walk iter -> ' + str(it) +
+                    print('Manifold2D-v8-random-walk iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
