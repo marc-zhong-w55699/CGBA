@@ -255,32 +255,38 @@ class Proposed_attack():
 
 
     def _circ_inc_walk(self, x_o, r, v, u, s, theta_safety_cap,
-                        init_angle, init_x):
+                        init_angle, init_x, theta_max_cur=None):
         """★ v8 INCREMENT-DOUBLING WALK (replaces BS).
 
            Start from sign-verified (init_angle, init_x). Each step, advance
            by an increment δ that doubles after each successful test. Stop
            when next angle is non-adv or hits theta_safety_cap.
 
-           Sequence (initial increment = init_angle × 2):
-              θ_0 = init_angle
-              θ_1 = θ_0 + 2·init_angle
-              θ_2 = θ_1 + 4·init_angle
-              ...
-              θ_k = init_angle × (2^(k+1) - 1)
+           ★ v8b: δ_init = max(2 × probe, θ_max_cur / 4)
+              Probe was kept small (θ_max/16) for sign-success rate, but
+              empirically best_θ / probe ≈ 6× (median), so walk wasted ~2
+              steps climbing. Boosting δ_init to ~θ_max/4 lets walk reach
+              the typical best_θ range in 1-2 steps.
+
+           Sequence (initial increment = δ_init):
+              θ_0 = init_angle             ← probe (sign-verified)
+              θ_1 = θ_0 + δ_init
+              θ_2 = θ_1 + 2·δ_init
+              θ_k = θ_0 + δ_init × (2^k - 1)
 
            No refine — single-iter precision matters less than per-iter cost
            savings (boundary varies across iters anyway).
 
            Returns (best_angle, x_best, num_queries).
-           Walk cost: log₂(best_θ / init_angle) queries on average.
         """
         best_angle = init_angle
         x_best     = init_x
         num_q      = 0
 
         θ_cur = init_angle
-        δ     = init_angle * 2.0    # initial increment = 2 × probe
+        # ★ v8b: floor δ_init at θ_max_cur/4 to avoid tiny first step
+        δ_min = (theta_max_cur / 4.0) if theta_max_cur is not None else 0.0
+        δ     = max(init_angle * 2.0, δ_min)
 
         while True:
             θ_next = θ_cur + δ
@@ -377,6 +383,7 @@ class Proposed_attack():
             theta_safety_cap=self.theta_max_bound,
             init_angle=sign_found_angle,
             init_x=sign_found_x,
+            theta_max_cur=theta_max,         # ★ v8b: δ_init floor = θ_max/4
         )
         num_calls += walk_q
 
@@ -519,7 +526,7 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v8-random-walk iter -> ' + str(it) +
+                    print('Manifold2D-v8b-random-walk iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
