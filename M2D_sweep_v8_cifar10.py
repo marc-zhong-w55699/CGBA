@@ -532,9 +532,25 @@ class Proposed_attack():
                 self.src_img, x_b, u=u_new, theta_max_cur=theta_max_cur,
             )
 
-            # ★ record v8's chosen θ into the snapshot just taken
+            # ★ record v8's chosen θ into the snapshot just taken + print
             if do_snapshot and len(self.snapshots) > 0:
-                self.snapshots[-1]['theta_v8'] = float(best_angle)
+                snap = self.snapshots[-1]
+                snap['theta_v8'] = float(best_angle)
+                # find largest adv angle on each side (assumes contiguous from 0)
+                left_adv  = snap['left_adv']
+                right_adv = snap['right_adv']
+                left_max  = float(self.theta_grid[left_adv].max())  if left_adv.any()  else 0.0
+                right_max = float(self.theta_grid[right_adv].max()) if right_adv.any() else 0.0
+                truth_max = max(left_max, right_max)
+                # adv counts (how many of 60 grid points are adv)
+                n_left  = int(left_adv.sum())
+                n_right = int(right_adv.sum())
+                print(f'  [SWEEP it={it} '
+                      f'L_max={math.degrees(left_max):.2f}° ({n_left}/{self.sweep_grid_size}) '
+                      f'R_max={math.degrees(right_max):.2f}° ({n_right}/{self.sweep_grid_size}) '
+                      f'truth={math.degrees(truth_max):.2f}° '
+                      f'v8={math.degrees(best_angle):.2f}° '
+                      f'gap={math.degrees(truth_max - best_angle):.2f}°]')
 
             # v5b adaptive theta_max
             if best_angle > 0:
@@ -622,6 +638,26 @@ class Proposed_attack():
                   f'min={math.degrees(min(theta_history)):.1f}°, '
                   f'max={math.degrees(max(theta_history)):.1f}°')
         print(f'Bump count: {bump_count}/{self.bump_max_per_image}')
+
+        # ★ sweep summary
+        if self.snapshots:
+            truth_angles = []
+            v8_angles    = []
+            gaps         = []
+            for snap in self.snapshots:
+                la, ra = snap['left_adv'], snap['right_adv']
+                lm = float(self.theta_grid[la].max())  if la.any()  else 0.0
+                rm = float(self.theta_grid[ra].max()) if ra.any() else 0.0
+                tm = max(lm, rm)
+                v8 = snap['theta_v8'] or 0.0
+                truth_angles.append(math.degrees(tm))
+                v8_angles.append(math.degrees(v8))
+                gaps.append(math.degrees(tm - v8))
+            ta = np.array(truth_angles); va = np.array(v8_angles); ga = np.array(gaps)
+            print(f'Sweep snapshots: {len(self.snapshots)}')
+            print(f'  truth_θ  mean={ta.mean():.2f}°  P50={np.percentile(ta,50):.2f}°  max={ta.max():.2f}°')
+            print(f'  v8 found mean={va.mean():.2f}°  P50={np.percentile(va,50):.2f}°  max={va.max():.2f}°')
+            print(f'  gap      mean={ga.mean():.2f}°  P50={np.percentile(ga,50):.2f}°  max={ga.max():.2f}°  (truth - v8)')
         print(f'────────────────────────────────────────────────')
 
         x_adv = clip_image_values(x_adv, self.lb, self.ub)
