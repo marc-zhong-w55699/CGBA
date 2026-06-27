@@ -14,51 +14,47 @@ import math
 #
 # ★ v7 inherited (probe=θ_max/16, fallback continuation, Smart-BS init).
 #
-# ★ v8 inherited: increment-doubling walk replaces BS (clean, no refine).
+# ★ v8 inherited: increment-doubling walk replaces BS.
 #
-# ★ v9 KEY CHANGE: ADD GEOMETRIC-SHRINK LINE SEARCH on (x_o → x_new).
+# ★ v9 KEY CHANGE: walk δ growth rate × 2.0 → × 1.5.
 #
 # Motivation:
-#   M2D's 2D circular evolution constrains x_new to the Thales circle of
-#   diameter (x_o, x_b), so r_new = r·cos(θ_best) — a HARD geometric cap.
-#   But the actual boundary along the new direction d_new = (x_new-x_o)/
-#   |x_new-x_o| may lie BETWEEN x_o and x_new. Line search exploits this.
+#   sweep experiment (50 imgs, 5000 snapshots) showed v8 walk's found/truth
+#   ratio is systematically 0.56 (CIFAR-10, both ViT and ResNet18). The
+#   problem: walk visits {probe, 3p, 7p, 15p, ...} — exponentially spaced
+#   gaps. Whenever truth falls between visits, "found" snaps to the lower
+#   neighbor, leaving up to 50% of the angle on the table.
 #
-#   Algorithm (per outer iter):
-#     1) M2D 2D walk → x_new on Thales circle at r·cos(θ_best) from x_o
-#     2) γ-decay shrink: try x_o + γ·(x_new - x_o), 0 < γ < 1.
-#        If adv: keep, recurse. If fail: stop.
-#        Cost: 1 to K queries (variable, typically 2 on ViT smooth boundary)
+#   Slower growth (g=1.5 instead of 2.0): visits {probe, 3p, 6p, 10.5p,
+#   17.25p, ...} — denser at small angles. Sim predicts:
+#     - found/truth ratio: 0.53 → 0.59  (+11%)
+#     - mean found_θ:     1.75° → 1.99° (+14%)
+#     - per-query r efficiency: +7%
 #
-#   Geometric gain:
-#     r_new(v8)  = r · cos(θ_best)                ← Thales cap
-#     r_new(v9)  = γ^k · r · cos(θ_best)          ← γ=0.9, k = successful shrinks
+#   Cost: walk_q goes up (4.4 → 5.3 in sim, ~+20% queries per iter).
+#   Effective iter @ 10k budget: ~2350 (vs v8 ~2800).
 #
-#   Why γ-decay beats BS on smooth boundary (α high, common in ViT):
-#     - BS K=3 starts at midpoint (0.5×): often fails (α > 0.5) → next 0.75
-#       → may fail → r unchanged with 3 q wasted.
-#     - γ=0.9 starts close to x_new: succeeds when α > 0.9 (likely for ViT)
-#       → r drops 10% with 2 q.
+# Inherited v8 design below:
 #
-# Cost: variable per iter, depends on K_max and γ.
-#   Default γ=0.9, K_max=3:
-#     - α > 0.9: 2 q, r×0.9
-#     - α ∈ [0.81, 0.9]: 2 q, r×0.9
-#     - α < 0.729: 3 q (hit K_max), r×0.729
-#   Average ~2.4 q/iter on ViT
-#   Total inner_q ≈ 3.69 (v8) + 2.4 = ~6.1
-#   At 10000 budget → ~1640 iters
+# Motivation:
+#   Adaptive θ_max is only a *weak prior* on the current iter's true best_θ
+#   (boundary curvature varies per iter as u is resampled). Constraining BS
+#   to [0, theta_max_cur] artificially caps best_θ — BS often misses large
+#   swings allowed by current geometry. Walk decouples search from adaptive:
 #
-# Why v9 may beat v7/v8 (0.221/0.223):
-#   - Early phase: boundaries vary a lot → α << 1 → huge gain per iter
-#   - Adds a NEW degree of freedom (radial r), v7/v8 are pure angular
-#   - Aligns with HSJA/CGBA/SurFree design (line search is standard)
-#
-# v8 KEY CHANGE (inherited): increment-doubling walk replaces BS.
-#   - Walk starts at sign-verified probe_angle
+#   - Walk starts at sign-verified probe_angle (init_lower equivalent)
 #   - Each step, advance by δ; on success, δ *= 2 (geometric expansion)
 #   - Stop on first non-adv OR hit theta_max_bound (60° hard cap)
 #   - Cost = log2(best_θ / probe), variable per-iter
+#
+# Trade-off vs v7 BS:
+#   - Walk in late-stuck (best≈probe): 1-2 walk q + 1 sign = 2-3q (vs 4q)
+#   - Walk in mid (best~2°):           2-3 walk q + 1 sign = 3-4q (vs 4q)
+#   - Walk in early (best~5°):         3-4 walk q + 1 sign = 4-5q (vs 4q)
+#   Average ~25% query reduction → ~33% more outer iters at same budget.
+#
+# Precision: each walk step found within ×2 factor (no refine — boundary
+#   varies across iters anyway, so single-iter precision is less critical).
 #
 # v6.4 KEY: when best_θ stays small (≤ thresh, excluding sign-fail) for K
 # consecutive iters, halve current θ_max (clamped at bump_target as floor)
@@ -130,10 +126,7 @@ class Proposed_attack():
                  bump_cooldown=50,             # min iters between bumps
                  bump_warmup=500,              # earliest iter to allow bump
                  bump_max_per_image=50,        # safety cap
-                 bump_norm_gate=0.5,           # ★ A: only bump when norm_cur ≥ norm_init × this
-                 # ★ v9 line search params (geometric shrink)
-                 ls_gamma=0.9,                 # shrink factor per step
-                 ls_max_calls=1):              # max shrink steps (actual may be less)
+                 bump_norm_gate=0.5):          # ★ A: only bump when norm_cur ≥ norm_init × this
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -166,10 +159,6 @@ class Proposed_attack():
         self.bump_warmup            = bump_warmup
         self.bump_max_per_image     = bump_max_per_image
         self.bump_norm_gate         = bump_norm_gate
-
-        # ★ v9 line search (geometric shrink)
-        self.ls_gamma     = ls_gamma
-        self.ls_max_calls = ls_max_calls
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.all_queries = 0
@@ -243,35 +232,6 @@ class Proposed_attack():
             if torch.norm(adv-cln).cpu().numpy() < self.tol or num_calls >= max_calls:
                 break
         return adv, num_calls
-
-
-
-    def _line_shrink(self, x_o, x_adv, gamma, max_calls):
-        """★ v9 line search via geometric shrink (γ-decay).
-
-           Each step tries `best ← x_o + γ·(best - x_o)`. If adv, keep;
-           else stop. Cost: 1 to max_calls queries.
-
-           Compared to BS:
-             - High-α boundary (smooth): finds 10% r-reduction in ~2 q
-               (vs BS's K queries that may find nothing)
-             - Low-α (irregular): less precise than BS, but still pushes
-               r down by γ^max_calls in worst case
-
-           ViT 边界平滑，γ=0.9 期望 inner_q +2.4 而非 +3.
-        """
-        num_calls = 0
-        best = x_adv
-        for _ in range(max_calls):
-            candidate = clip_image_values(
-                x_o + gamma * (best - x_o), self.lb, self.ub
-            ).to(self.device)
-            num_calls += 1
-            if self.is_adversarial(candidate) == 1:
-                best = candidate
-            else:
-                break    # boundary reached
-        return best, num_calls
 
 
 
@@ -353,7 +313,7 @@ class Proposed_attack():
                 best_angle = θ_next
                 x_best     = x_test
                 θ_cur      = θ_next
-                δ         *= 2.0    # increment doubles
+                δ         *= 1.5    # ★ v9: × 2.0 → × 1.5 (denser visits, less overshoot)
             else:
                 break    # boundary
 
@@ -515,19 +475,6 @@ class Proposed_attack():
                 self.src_img, x_b, u=u_new, theta_max_cur=theta_max_cur,
             )
 
-            # ★ v9: geometric shrink along (x_o → x_new) to push r below Thales cap.
-            # Each step: best ← x_o + γ·(best - x_o), stop on first non-adv.
-            # On smooth boundaries (ViT, α high) avg ~2 q, finds 10% r reduction
-            # where BS would have wasted 3 q for 0 gain.
-            ls_q = 0
-            if best_angle > 0:
-                x_adv, ls_q = self._line_shrink(
-                    self.src_img, x_adv,
-                    gamma=self.ls_gamma,
-                    max_calls=self.ls_max_calls,
-                )
-            qs += ls_q
-
             # v5b adaptive theta_max
             if best_angle > 0:
                 if best_angle > 0.8 * theta_max_cur:
@@ -591,7 +538,7 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v9-random-LS iter -> ' + str(it) +
+                    print('Manifold2D-v9-walk-g1.5 iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
