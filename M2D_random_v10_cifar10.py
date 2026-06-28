@@ -25,7 +25,9 @@ import math
 #     - sign probe @ 1° has 61% disc rate, @ 4° has 63% + 21% fallback
 #
 #   v10 design:
-#     - sign_probe at θ_max/4 (capped at 4°) — better sign discrimination
+#     - sign_probe = min(max(θ_max/4, 1°), 8°)
+#       * 8° cap: early phase (iter 0-50, θ_max > 32°) walk starts very high
+#       * 1° floor: late phase (θ_max < 4°) avoids sign disc dropping below 61%
 #     - test BOTH +s and -s at sign_probe (always 2 q) — catches wrong-sign
 #     - walk starts at sign_probe (info reuse — already verified adv)
 #     - walk δ_init = θ_max/8 (independent of sign_probe size, same as v8)
@@ -125,8 +127,9 @@ class Proposed_attack():
                  bump_warmup=500,              # earliest iter to allow bump
                  bump_max_per_image=50,        # safety cap
                  bump_norm_gate=0.5,           # ★ A: only bump when norm_cur ≥ norm_init × this
-                 # ★ v10 decoupled sign probe
-                 sign_probe_cap=math.pi/45):   # max sign_probe angle (= 4°)
+                 # ★ v10 decoupled sign probe (with floor + cap)
+                 sign_probe_cap=math.pi/22.5,  # max sign_probe angle (= 8°)
+                 sign_probe_floor=math.pi/180):# min sign_probe angle (= 1°)
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -160,8 +163,9 @@ class Proposed_attack():
         self.bump_max_per_image     = bump_max_per_image
         self.bump_norm_gate         = bump_norm_gate
 
-        # ★ v10 decoupled sign probe
-        self.sign_probe_cap = sign_probe_cap
+        # ★ v10 decoupled sign probe (cap + floor)
+        self.sign_probe_cap   = sign_probe_cap
+        self.sign_probe_floor = sign_probe_floor
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.all_queries = 0
@@ -354,7 +358,9 @@ class Proposed_attack():
         # sign_probe at θ_max/4, capped at 4°, no floor. Test BOTH sides
         # always (vs v8 which tested -s only if +s failed). This catches
         # the 43% "wrong sign" cases the sweep revealed.
-        sign_probe_angle = min(theta_max / 4.0, self.sign_probe_cap)
+        # ★ v10: clamp to [floor, cap]. floor catches small θ_max late phase.
+        sign_probe_angle = min(max(theta_max / 4.0, self.sign_probe_floor),
+                                self.sign_probe_cap)
         s = 0
         sign_found_angle = None
         sign_found_x     = None
