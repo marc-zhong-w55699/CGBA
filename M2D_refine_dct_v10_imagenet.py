@@ -53,7 +53,7 @@ class Proposed_attack():
                  bump_target=math.pi / 360,        # 0.5° (deeper bump than CIFAR's 1°)
                  bump_cooldown=50,                 # ImageNet: 20 (shorter than CIFAR's 50)
                  bump_warmup=100,                  # ImageNet: 100 (earlier than CIFAR's 500)
-                 bump_max_per_image=100,
+                 bump_max_per_image=0,    # ★ ablation: bump disabled
                  bump_norm_gate=0.0,               # ★ v6.5 TEST: 0 = always on (ImageNet needs bump)
                  # ★ v10 decoupled sign probe (cap + floor)
                  sign_probe_cap=math.pi/22.5,      # max sign_probe angle (= 8°)
