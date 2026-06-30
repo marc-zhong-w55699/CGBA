@@ -39,7 +39,7 @@ class Proposed_attack():
                  tar_img=None, iteration=700, tol=1e-5, attack_method='manifold_search_2d',
                  verbose_control='Yes',
                  dct_ratio=1.0/8,
-                 theta_max=math.pi / 3.6,         # ★ v6.5 TEST: 50° init (was 60°)
+                 theta_max=math.pi / 9,           # ★ v10b: 20° init (sweep: early truth ~9°)
                  theta_min_bound=math.pi / 90,    # 2°
                  theta_max_bound=math.pi / 3,     # ★ v6.5 TEST: 60° cap (was 90°)
                  grow_factor=1.15,
@@ -57,7 +57,7 @@ class Proposed_attack():
                  bump_norm_gate=0.0,               # ★ v6.5 TEST: 0 = always on (ImageNet needs bump)
                  # ★ v10 decoupled sign probe (cap + floor)
                  sign_probe_cap=math.pi/22.5,      # max sign_probe angle (= 8°)
-                 sign_probe_floor=math.pi/360):    # min sign_probe angle (= 0.5°, ImageNet best_θ smaller)
+                 sign_probe_floor=math.pi/225):    # min sign_probe angle (= 0.8°, sweep sweet spot)
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
