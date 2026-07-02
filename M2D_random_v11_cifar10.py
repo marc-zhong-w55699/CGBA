@@ -428,18 +428,22 @@ class Proposed_attack():
             if s == 0:
                 return x_b, num_calls, 0.0
 
-        # ★ v8 INCREMENT-DOUBLING WALK (replaces BS)
-        # Walk uses theta_max_bound as hard safety cap (= π/3 = 60°),
-        # NOT adaptive theta_max (which is a weak prior from previous iter).
-        # This decouples search range from adaptive — walk finds large best_θ
-        # when boundary allows, regardless of recent best_θ history.
-        best_angle, x_best, walk_q = self._circ_inc_walk(
-            x_o, r, v, u, s,
-            theta_safety_cap=self.theta_max_bound,
-            init_angle=sign_found_angle,
-            init_x=sign_found_x,
-            delta_init=theta_max / 8.0,   # ★ v10: independent of sign_probe size
-        )
+        # ★ v11.1: skip walk when fallback halving found sign at < floor.
+        # This u direction is truly narrow (all 3 attempts + fallback needed).
+        # Walking further has poor per-q efficiency; just use sign_found_angle.
+        if sign_found_angle < self.sign_probe_floor:
+            best_angle = sign_found_angle
+            x_best     = sign_found_x
+            walk_q     = 0
+        else:
+            # ★ v8 INCREMENT-DOUBLING WALK (replaces BS)
+            best_angle, x_best, walk_q = self._circ_inc_walk(
+                x_o, r, v, u, s,
+                theta_safety_cap=self.theta_max_bound,
+                init_angle=sign_found_angle,
+                init_x=sign_found_x,
+                delta_init=theta_max / 8.0,
+            )
         num_calls += walk_q
 
         if x_best is not None and best_angle > 0:
@@ -593,7 +597,7 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v11-urej iter -> ' + str(it) +
+                    print('Manifold2D-v11.1-skipnarrow iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
