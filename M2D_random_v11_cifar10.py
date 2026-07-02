@@ -131,7 +131,8 @@ class Proposed_attack():
                  sign_probe_cap=math.pi/22.5,  # max sign_probe angle (= 8°)
                  sign_probe_floor=math.pi/180,  # min sign_probe angle (= 1°)
                  # ★ v11 u-rejection
-                 max_u_attempts=3):             # retry u up to N times if boundary < floor
+                 max_u_attempts=4,              # ★ v11.1: 3→4 more chances at good u
+                 halving_min=math.pi/720):      # ★ v11.1: 0.25° → halving only tests once at 0.5°
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -171,6 +172,7 @@ class Proposed_attack():
 
         # ★ v11 u-rejection
         self.max_u_attempts = max_u_attempts
+        self.halving_min    = halving_min
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.all_queries = 0
@@ -409,7 +411,8 @@ class Proposed_attack():
 
         if s == 0:
             cur_beta = sign_probe_angle / 2.0
-            while cur_beta > beta_min:
+            # ★ v11.1: use self.halving_min instead of beta_min param
+            while cur_beta > self.halving_min:
                 x_pos = self._circ_x_at(x_o, r, v, u, +1, cur_beta)
                 num_calls += 1
                 if self.is_adversarial(x_pos) == 1:
@@ -597,7 +600,7 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v11.1-skipnarrow iter -> ' + str(it) +
+                    print('Manifold2D-v11.1-a4h05 iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
