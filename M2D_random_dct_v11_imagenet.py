@@ -39,7 +39,7 @@ class Proposed_attack():
                  tar_img=None, iteration=700, tol=1e-5, attack_method='manifold_search_2d',
                  verbose_control='Yes',
                  dct_ratio=1.0/8,
-                 theta_max=math.pi / 4,           # ★ v11: 45° init (raised from 20°)
+                 theta_max=math.pi / 3.6,         # ★ v11: 50° init (same as CIFAR)
                  theta_min_bound=math.pi / 90,    # 2°
                  theta_max_bound=math.pi / 3,     # 60° cap
                  grow_factor=1.15,
@@ -53,7 +53,7 @@ class Proposed_attack():
                  bump_target=math.pi / 360,        # 0.5° (deeper bump than CIFAR's 1°)
                  bump_cooldown=50,                 # ImageNet: 20 (shorter than CIFAR's 50)
                  bump_warmup=100,                  # ImageNet: 100 (earlier than CIFAR's 500)
-                 bump_max_per_image=100,           # ★ v11: bump re-enabled (ImageNet needs it)
+                 bump_max_per_image=0,             # ★ v11 test: bump disabled
                  bump_norm_gate=0.0,               # 0 = always on (ImageNet needs bump)
                  # ★ v10 decoupled sign probe (cap + floor)
                  sign_probe_cap=math.pi/22.5,      # max sign_probe angle (= 8°)
