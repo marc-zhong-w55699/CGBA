@@ -372,13 +372,15 @@ class Proposed_attack():
             else:
                 return x_b, num_calls, 0.0
 
-        # ★ v10: walk from sign_found_angle, δ_init independent
+        # ★ v11.2: walk from sign_found_angle,
+        # δ_init = max(θ_max/8, sign_probe_angle) — walk step at least as big
+        # as sign probe (ensures walk expands outward, not just inches around probe)
         best_angle, x_best, walk_q = self._circ_inc_walk(
             x_o, r, v, u, s,
             theta_safety_cap=self.theta_max_bound,
             init_angle=sign_found_angle,
             init_x=sign_found_x,
-            delta_init=theta_max / 8.0,   # ★ v10: independent of sign_probe size
+            delta_init=max(theta_max / 8.0, sign_probe_angle),
         )
         num_calls += walk_q
 
@@ -529,7 +531,7 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v11-random-dct-a4h05 iter -> ' + str(it) +
+                    print('Manifold2D-v11.2-deltamax iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
