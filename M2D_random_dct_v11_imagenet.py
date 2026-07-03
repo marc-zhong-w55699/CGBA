@@ -57,10 +57,10 @@ class Proposed_attack():
                  bump_norm_gate=0.0,               # 0 = always on (ImageNet needs bump)
                  # ★ v10 decoupled sign probe (cap + floor)
                  sign_probe_cap=math.pi/22.5,      # max sign_probe angle (= 8°)
-                 sign_probe_floor=math.pi/120,     # ★ Option A: 1.5° (was 1°, higher sign disc)
+                 sign_probe_floor=math.pi/180,     # 1° (default v11)
                  # ★ v11 u-rejection + halving cap
-                 max_u_attempts=5,                 # ★ Option A: 5 (was 4, buffer higher fail rate)
-                 halving_min=math.pi/360):         # ★ Option A: 0.5° = disable halving
+                 max_u_attempts=4,                 # retry u up to N times
+                 halving_min=math.pi/720):         # 0.25° → halving only 1 test
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -529,7 +529,7 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v11A-f15-a5-nohalve iter -> ' + str(it) +
+                    print('Manifold2D-v11-random-dct-a4h05 iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
