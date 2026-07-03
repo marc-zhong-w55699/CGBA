@@ -60,7 +60,7 @@ class Proposed_attack():
                  sign_probe_floor=math.pi/180,     # 1° (default v11)
                  # ★ v11 u-rejection + halving cap
                  max_u_attempts=4,                 # retry u up to N times
-                 halving_min=math.pi/720):         # 0.25° → halving only 1 test
+                 halving_min=math.pi/360):         # 0.25° → halving only 1 test
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
