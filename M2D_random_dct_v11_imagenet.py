@@ -39,9 +39,9 @@ class Proposed_attack():
                  tar_img=None, iteration=700, tol=1e-5, attack_method='manifold_search_2d',
                  verbose_control='Yes',
                  dct_ratio=1.0/8,
-                 theta_max=math.pi / 3.6,         # ★ v11: 50° init (same as CIFAR)
+                 theta_max=math.pi * 7 / 18,      # ★ v11.3: 70° init (ImageNet-tuned, was 50°)
                  theta_min_bound=math.pi / 90,    # 2°
-                 theta_max_bound=math.pi / 3,     # 60° cap
+                 theta_max_bound=math.pi / 2,     # ★ v11.3: 90° walk cap (was 60°)
                  grow_factor=1.15,
                  shrink_factor=0.85,
                  shrink_thresh=0.15,
@@ -372,15 +372,22 @@ class Proposed_attack():
             else:
                 return x_b, num_calls, 0.0
 
-        # ★ v11.2: walk from sign_found_angle,
-        # δ_init = max(θ_max/8, sign_probe_angle) — walk step at least as big
-        # as sign probe (ensures walk expands outward, not just inches around probe)
+        # ★ v11.3: PHASE-AWARE δ_init
+        # θ_max > 8°  (early/mid): aggressive δ = max(θ_max/8, probe) — v11.2 style
+        # θ_max ≤ 8°  (late):      conservative δ = θ_max/8 — decouple from probe floor
+        # Rationale: late phase probe=1° (floor) dominates max(), causing walk
+        # overshoot & stuck (60% stuck rate observed on ImageNet v11.2).
+        # 8° threshold = probe transition point (probe=θ_max/4 becomes > floor here).
+        if theta_max > math.pi / 22.5:   # > 8°  → aggressive
+            walk_delta_init = max(theta_max / 8.0, sign_probe_angle)
+        else:                             # ≤ 8° → conservative (avoid stuck)
+            walk_delta_init = theta_max / 8.0
         best_angle, x_best, walk_q = self._circ_inc_walk(
             x_o, r, v, u, s,
             theta_safety_cap=self.theta_max_bound,
             init_angle=sign_found_angle,
             init_x=sign_found_x,
-            delta_init=max(theta_max / 8.0, sign_probe_angle),
+            delta_init=walk_delta_init,
         )
         num_calls += walk_q
 
@@ -531,7 +538,7 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v11.2-deltamax iter -> ' + str(it) +
+                    print('Manifold2D-v11.3-phase iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
