@@ -382,7 +382,7 @@ class Proposed_attack():
             theta_safety_cap=self.theta_max_bound,
             init_angle=sign_found_angle,
             init_x=sign_found_x,
-            delta_init=max(theta_max / 6.0, sign_probe_angle),
+            delta_init=max(theta_max / 8.0, sign_probe_angle),
         )
         num_calls += walk_q
 
