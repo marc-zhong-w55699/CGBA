@@ -38,10 +38,10 @@ class Proposed_attack():
     def __init__(self, model, src_img, mean, std, lb, ub, dim_reduc_factor=4,
                  tar_img=None, iteration=700, tol=1e-5, attack_method='manifold_search_2d',
                  verbose_control='Yes',
-                 dct_ratio=1.0/4,
-                 theta_max=math.pi * 7 / 18,      # ★ v11.3: 70° init (ImageNet-tuned, was 50°)
+                 dct_ratio=1.0/8,
+                 theta_max=math.pi / 3.6,         # ★ v11: 50° init (same as CIFAR)
                  theta_min_bound=math.pi / 90,    # 2°
-                 theta_max_bound=math.pi / 3,     # ★ v11.3: 90° walk cap (was 60°)
+                 theta_max_bound=math.pi / 3,     # 60° cap
                  grow_factor=1.15,
                  shrink_factor=0.85,
                  shrink_thresh=0.15,
@@ -372,11 +372,9 @@ class Proposed_attack():
             else:
                 return x_b, num_calls, 0.0
 
-        # ★ v11.3.2: δ_init = max(θ_max/4, probe) — bigger initial walk step.
-        # Only differs from /8 when θ_max > 32° (probe hits ceil 8°).
-        # Early phase (θ_max ∈ [50°, 90°]): δ = θ_max/4 instead of θ_max/8
-        #   → walk skips one small step, reaches similar range with -1 q/iter.
-        # Mid/late (θ_max ≤ 32°): probe dominates max(), same behavior as v11.2.
+        # ★ v11.2: walk from sign_found_angle,
+        # δ_init = max(θ_max/8, sign_probe_angle) — walk step at least as big
+        # as sign probe (ensures walk expands outward, not just inches around probe)
         best_angle, x_best, walk_q = self._circ_inc_walk(
             x_o, r, v, u, s,
             theta_safety_cap=self.theta_max_bound,
@@ -533,7 +531,7 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v11.3.2-delta4 iter -> ' + str(it) +
+                    print('Manifold2D-v11.2-deltamax iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
