@@ -38,9 +38,9 @@ class Proposed_attack():
     def __init__(self, model, src_img, mean, std, lb, ub, dim_reduc_factor=4,
                  tar_img=None, iteration=700, tol=1e-5, attack_method='manifold_search_2d',
                  verbose_control='Yes',
-                 dct_ratio=1.0/16,
+                 dct_ratio=1.0/4,
                  theta_max=math.pi * 7 / 18,      # ★ v11.3: 70° init (ImageNet-tuned, was 50°)
-                 theta_min_bound=math.pi / 180,    # 2°
+                 theta_min_bound=math.pi / 60,    # 2°
                  theta_max_bound=math.pi / 3,     # ★ v11.3: 90° walk cap (was 60°)
                  grow_factor=1.15,
                  shrink_factor=0.85,
