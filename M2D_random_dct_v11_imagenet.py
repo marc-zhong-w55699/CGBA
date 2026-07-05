@@ -372,22 +372,17 @@ class Proposed_attack():
             else:
                 return x_b, num_calls, 0.0
 
-        # ★ v11.3: PHASE-AWARE δ_init
-        # θ_max > 8°  (early/mid): aggressive δ = max(θ_max/8, probe) — v11.2 style
-        # θ_max ≤ 8°  (late):      conservative δ = θ_max/8 — decouple from probe floor
-        # Rationale: late phase probe=1° (floor) dominates max(), causing walk
-        # overshoot & stuck (60% stuck rate observed on ImageNet v11.2).
-        # 8° threshold = probe transition point (probe=θ_max/4 becomes > floor here).
-        if theta_max > math.pi / 22.5:   # > 8°  → aggressive
-            walk_delta_init = max(theta_max / 8.0, sign_probe_angle)
-        else:                             # ≤ 8° → conservative (avoid stuck)
-            walk_delta_init = theta_max / 8.0
+        # ★ v11.3.2: δ_init = max(θ_max/4, probe) — bigger initial walk step.
+        # Only differs from /8 when θ_max > 32° (probe hits ceil 8°).
+        # Early phase (θ_max ∈ [50°, 90°]): δ = θ_max/4 instead of θ_max/8
+        #   → walk skips one small step, reaches similar range with -1 q/iter.
+        # Mid/late (θ_max ≤ 32°): probe dominates max(), same behavior as v11.2.
         best_angle, x_best, walk_q = self._circ_inc_walk(
             x_o, r, v, u, s,
             theta_safety_cap=self.theta_max_bound,
             init_angle=sign_found_angle,
             init_x=sign_found_x,
-            delta_init=walk_delta_init,
+            delta_init=max(theta_max / 4.0, sign_probe_angle),
         )
         num_calls += walk_q
 
@@ -538,7 +533,7 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v11.3-phase iter -> ' + str(it) +
+                    print('Manifold2D-v11.3.2-delta4 iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
