@@ -40,7 +40,7 @@ class Proposed_attack():
                  verbose_control='Yes',
                  dct_ratio=1.0/4,
                  theta_max=math.pi * 7 / 18,      # ★ v11.3: 70° init (ImageNet-tuned, was 50°)
-                 theta_min_bound=math.pi / 60,    # 2°
+                 theta_min_bound=math.pi / 90,    # 2°
                  theta_max_bound=math.pi / 3,     # ★ v11.3: 90° walk cap (was 60°)
                  grow_factor=1.15,
                  shrink_factor=0.85,
