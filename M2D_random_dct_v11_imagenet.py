@@ -44,7 +44,7 @@ class Proposed_attack():
                  theta_max_bound=math.pi / 3,     # v11.2: 60° cap
                  grow_factor=1.15,
                  shrink_factor=0.85,
-                 shrink_thresh=0.30,              # ★ Test A: 0.30 (was 0.15) - break late stuck
+                 shrink_thresh=0.15,
                  BS_iter=3,
                  # ★ v6.4 reverse bump params (ImageNet-tuned, with new mechanisms)
                  bump_best_theta_thresh=math.pi / 180,  # 1° (ImageNet best_θ P50 ≈ 1°)
@@ -531,7 +531,7 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v11.2-testA-shrink030 iter -> ' + str(it) +
+                    print('Manifold2D-v11.2-deltamax iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
