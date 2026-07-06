@@ -59,7 +59,7 @@ class Proposed_attack():
                  sweep_every=20,                   # snapshot interval (outer iters)
                  sweep_grid_size=60,
                  sweep_theta_min_deg=0.1,
-                 sweep_theta_max_deg=60.0):
+                 sweep_theta_max_deg=90.0):        # ★ extended: 60° → 90° (test wider truth range)
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
