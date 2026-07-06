@@ -610,8 +610,8 @@ class Proposed_attack():
                 tm = max(lm, rm)
                 v11 = snap['theta_v11'] or 0.0
                 truth_angles.append(math.degrees(tm))
-                v11_angles.append(math.degrees(v10))
-                gaps.append(math.degrees(tm - v10))
+                v11_angles.append(math.degrees(v11))
+                gaps.append(math.degrees(tm - v11))
             ta = np.array(truth_angles); va = np.array(v11_angles); ga = np.array(gaps)
             print(f'Sweep snapshots: {len(self.snapshots)}')
             print(f'  truth_θ  mean={ta.mean():.2f}°  P50={np.percentile(ta,50):.2f}°  max={ta.max():.2f}°')
