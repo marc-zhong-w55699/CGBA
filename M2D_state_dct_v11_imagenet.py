@@ -7,7 +7,7 @@ import math
 
 
 # ============================================================================
-# ImageNet M2D-random (λ=0,0,1)  v10 = v6 + v8 walk + v10 sign-decoupled
+# ImageNet M2D-state (dynamic λ via state machine)  v12 = v11.2 + walk halving
 #   + DCT (square low-freq block, dct_ratio=1/8)
 #   + v3 geometry (circular evolution)
 #   + v5b adaptive theta_max
@@ -442,7 +442,26 @@ class Proposed_attack():
         size = self.src_img.shape
 
         outer_iter = self.iteration
-        lam1, lam2, lam3 = 0, 0, 1            # ★ random
+
+        # ★ State machine config (from state_v3/v5)
+        STATE_EXPLOIT = 'EXPLOIT'
+        STATE_EXPLORE = 'EXPLORE'
+        STATE_REFINE  = 'REFINE'
+        STATE_WEIGHTS = {
+            STATE_EXPLOIT: (0.4, 0.3, 0.3),
+            STATE_EXPLORE: (0.2, 0.2, 0.6),
+            STATE_REFINE:  (0.3, 0.5, 0.2),
+        }
+        EPS_PROGRESS   = 0.005
+        STAG_THRESH    = 5
+        R_REFINE_RATIO = 0.15
+        MIN_DWELL      = 2
+
+        state  = STATE_EXPLOIT
+        stag_k = 0
+        dwell  = 0
+        r_init = float(torch.norm(x_b - self.src_img).item())
+        r_prev = r_init
 
         u_prev = None
         x_e_prev = None
@@ -463,6 +482,32 @@ class Proposed_attack():
             if r_cur < 1e-8:
                 break
             v_new = diff / r_cur
+
+            # ★ State machine update
+            r_now     = float(r_cur.item())
+            delta_rel = (r_prev - r_now) / max(r_prev, 1e-12)
+            r_ratio   = r_now / max(r_init, 1e-12)
+            if delta_rel < EPS_PROGRESS:
+                stag_k += 1
+            else:
+                stag_k = 0
+
+            dwell += 1
+            if dwell >= MIN_DWELL:
+                if r_ratio < R_REFINE_RATIO:
+                    new_state = STATE_REFINE
+                elif stag_k >= STAG_THRESH:
+                    new_state = STATE_EXPLORE
+                elif delta_rel > EPS_PROGRESS:
+                    new_state = STATE_EXPLOIT
+                else:
+                    new_state = state
+                if new_state != state:
+                    state  = new_state
+                    dwell  = 0
+                    stag_k = 0
+            lam1, lam2, lam3 = STATE_WEIGHTS[state]
+            r_prev = r_now
 
             d1 = self._proj_and_normalize(x_e_prev - x_b_prev, v_new) \
                  if (x_e_prev is not None and x_b_prev is not None) else None
@@ -557,7 +602,7 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v12-random-walkhalve iter -> ' + str(it) +
+                    print('Manifold2D-v12-state-walkhalve iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
