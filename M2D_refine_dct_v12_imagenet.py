@@ -7,7 +7,7 @@ import math
 
 
 # ============================================================================
-# ImageNet M2D-explore (λ=0.2,0.2,0.6)  v11.2 baseline (no walk halving)
+# ImageNet M2D-refine (λ=0.3,0.5,0.2)  v12 = v11.2 + walk halving
 #   + DCT (square low-freq block, dct_ratio=1/8)
 #   + v3 geometry (circular evolution)
 #   + v5b adaptive theta_max
@@ -60,7 +60,9 @@ class Proposed_attack():
                  sign_probe_floor=math.pi/180,     # 1° (default v11)
                  # ★ v11 u-rejection + halving cap
                  max_u_attempts=4,                 # retry u up to N times
-                 halving_min=math.pi/360):         # 0.5° sign fallback halving stop
+                 halving_min=math.pi/360,          # 0.5° sign fallback halving stop
+                 # ★ v12 walk-halving
+                 walk_halving_min=math.pi/360):    # ★ v12.2: 0.5° walk halving stop (was 0.25°)
         self.model = model
         self.src_img = src_img
         self.src_lbl = torch.argmax(self.model.forward(Variable(self.src_img, requires_grad=True)).data).item()
@@ -102,6 +104,9 @@ class Proposed_attack():
         # ★ v11 u-rejection + halving cap
         self.max_u_attempts = max_u_attempts
         self.halving_min    = halving_min
+
+        # ★ v12 walk-halving
+        self.walk_halving_min = walk_halving_min
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.all_queries = 0
@@ -249,6 +254,10 @@ class Proposed_attack():
                         init_angle, init_x, delta_init=None):
         """★ v8 increment-doubling walk (replaces BS).
            ★ v10: delta_init decoupled from init_angle (default 2× init_angle).
+           ★ v12: HALVING-AFTER-FAIL — on failed test, halve δ and retry
+                  until adv is found OR δ < walk_halving_min. This closes the
+                  systematic 33-37% gap between walk waypoints (sweep evidence:
+                  late gap P50 = 0.52°, 56% iter have gap ∈ [0.3°, 1°]).
         """
         best_angle = init_angle
         x_best     = init_x
@@ -271,7 +280,19 @@ class Proposed_attack():
                 θ_cur      = θ_next
                 δ         *= 2.0    # increment doubles
             else:
-                break    # boundary
+                # ★ v12.1: halving retry after fail — STOP on first adv (no chain)
+                while δ > self.walk_halving_min:
+                    δ /= 2.0
+                    θ_h = θ_cur + δ
+                    if θ_h >= theta_safety_cap:
+                        continue
+                    x_h = self._circ_x_at(x_o, r, v, u, s, θ_h)
+                    num_q += 1
+                    if self.is_adversarial(x_h) == 1:
+                        best_angle = θ_h
+                        x_best     = x_h
+                        break
+                break    # ★ v12.1: always end walk after any fail
 
         return best_angle, x_best, num_q
 
@@ -416,7 +437,7 @@ class Proposed_attack():
         size = self.src_img.shape
 
         outer_iter = self.iteration
-        lam1, lam2, lam3 = 0.2, 0.2, 0.6      # ★ explore
+        lam1, lam2, lam3 = 0.3, 0.5, 0.2      # ★ refine
 
         u_prev = None
         x_e_prev = None
@@ -531,7 +552,7 @@ class Proposed_attack():
 
             if it % 50 == 0 or it == outer_iter - 1 or bump_log:
                 if self.verbose_control == 'Yes':
-                    print('Manifold2D-v11.2-explore iter -> ' + str(it) +
+                    print('Manifold2D-v12.2-refine-halve05 iter -> ' + str(it) +
                           '   Queries ' + str(q_num) +
                           '   norm -> ' + f'{norm.item():.3f}' +
                           f'   inner_q={qs}' +
