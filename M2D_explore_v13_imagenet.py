@@ -59,7 +59,7 @@ class Proposed_attack():
                  sign_probe_cap=math.pi/22.5,      # max sign_probe angle (= 8°)
                  sign_probe_floor=math.pi/180,     # 1° (default v11)
                  # ★ v11 u-rejection + halving cap
-                 max_u_attempts=4,                 # retry u up to N times
+                 max_u_attempts=1,                 # ★ v13: 1 (was 4) — no-DCT retry has no benefit
                  halving_min=math.pi/360,          # 0.5° sign fallback halving stop
                  # ★ v12 walk-halving
                  walk_halving_min=math.pi/720):    # ★ v12.1: 0.25° walk halving stop (v12.1 base — best ViT explore)
