@@ -196,7 +196,8 @@ class Proposed_attack():
         num_calls = 1
         step_fb = 0.02
         perturbed = image
-        while self.is_adversarial(perturbed) == -1:
+        max_fallback = 200   # ★ v13.1 OOM fix: bound fallback loop
+        while self.is_adversarial(perturbed) == -1 and num_calls < max_fallback:
             pert = self._low_freq_dct(image.shape).to(self.device)   # ★ DCT here
             perturbed = image + num_calls * step_fb * pert
             perturbed = clip_image_values(perturbed, self.lb, self.ub).to(self.device)
@@ -423,6 +424,12 @@ class Proposed_attack():
 
 
     def Attack(self):
+        # ★ v13.1 OOM fix: wrap entire attack in no_grad() to prevent autograd
+        # graph accumulation across thousands of model forward calls.
+        with torch.no_grad():
+            return self._attack_impl()
+
+    def _attack_impl(self):
         norms = []
         n_query = []
         grad = 0
@@ -463,6 +470,10 @@ class Proposed_attack():
         bump_cooldown_ctr = 0
 
         for it in range(outer_iter):
+            # ★ v13.1 OOM fix: periodic GPU cache release
+            if it % 100 == 0 and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             diff = x_b - self.src_img
             r_cur = torch.norm(diff)
             if r_cur < 1e-8:
