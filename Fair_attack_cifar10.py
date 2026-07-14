@@ -5,14 +5,20 @@ Fair-comparison driver for CIFAR-10 decision-based attacks.
 Differences vs the vanilla driver (attack_cifar10.py):
   1. append-all           : records the L2 curve for EVERY clean-classified
                             image, not just the post-verify successes.
-  2. running-min (capped) : an extra key `all_norms_running_min` is saved.
-                            Per-image reported L2 = min over the trajectory,
-                            capped at ||x0||   (matches TtBA `Reall2`).
+  2. running-min          : an extra key `all_norms_running_min` is saved.
+                            Per-image reported L2 = min over the trajectory.
+  3. init-fallback        : for post-verify FAILED images, the running-min
+                            curve is replaced by norm_initial (= norms[0],
+                            the L2 of the random-init adversarial, which is
+                            guaranteed valid after clip).  This prevents a
+                            failed attack from being under-reported by its
+                            algorithm-internal "best" state that doesn't
+                            survive re-normalization.
 
 .npz keys — original 5 kept exactly:
     norm, query, all_norms, all_queries, asr
-plus 4 new extras:
-    all_norms_running_min, all_x0_norms, all_postverify_ok, all_best_l2
+plus 3 new extras:
+    all_norms_running_min, all_postverify_ok, all_best_l2
 '''
 import torch
 import torchvision.transforms as transforms
@@ -36,7 +42,7 @@ CIFAR10_CLASSES = [
     'airplane', 'automobile', 'bird', 'cat', 'deer',
     'dog', 'frog', 'horse', 'ship', 'truck'
 ]
-num_img          = 100
+num_img          = 50
 iteration        = 2500
 attack_methods   = ['Manifold2D']
 dim_reduc_factor = 4
@@ -52,7 +58,6 @@ tf_normalize = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(mean=mean, std=std),
 ])
-tf_to_pixel = transforms.ToTensor()   # pixel-space [0,1] for ||x0|| cap
 
 def numpy_uint8_to_tensor(arr):
     """uint8 numpy (H,W,C) → normalized tensor (1,C,H,W) on device"""
@@ -69,7 +74,6 @@ for model_name in MODEL_NAMES:
         print(f'{"="*60}')
         all_norms         = []   # raw L2 curve per image
         all_queries       = []
-        all_x0_norms      = []   # per-image ||x0|| (pixel space)
         all_postverify_ok = []   # per-image: post-verify pass / fail
         image_iter        = 0
         success_count     = 0    # post-verify success count (for `asr`)
@@ -84,15 +88,12 @@ for model_name in MODEL_NAMES:
             x_0 = tf_normalize(im_pil)[None].to(device)
             lb  = numpy_uint8_to_tensor(lb_np)
             ub  = numpy_uint8_to_tensor(ub_np)
-            # ── 像素空间 ‖x0‖（用于 cap） ────────────────────────
-            x0_norm = float(torch.norm(tf_to_pixel(im_pil)).item())
             # ── 模型预测 ──────────────────────────────────────────
             with torch.no_grad():
                 orig_label = torch.argmax(net(x_0)).item()
             print(f'\nImage {image_iter1:05d}: '
                   f'GT={CIFAR10_CLASSES[ground_label_int]}  '
-                  f'Pred={CIFAR10_CLASSES[orig_label]}  '
-                  f'||x0||={x0_norm:.2f}')
+                  f'Pred={CIFAR10_CLASSES[orig_label]}')
             # ── 跳过已误分类样本 ──────────────────────────────────
             if ground_label_int != orig_label:
                 print('Misclassified, skip.')
@@ -130,7 +131,6 @@ for model_name in MODEL_NAMES:
             # ── append-all (核心改动) ─────────────────────────
             all_norms        .append(norms)
             all_queries      .append(n_query)
-            all_x0_norms     .append(x0_norm)
             all_postverify_ok.append(pv_ok)
 
         # ── ASR 统计 ──────────────────────────────────────────────
@@ -144,21 +144,25 @@ for model_name in MODEL_NAMES:
 
         # ── 保存结果 ──────────────────────────────────────────────
         if len(all_norms) > 0:
-            norm_array   = np.array(all_norms)          # (N, T) raw
-            query_array  = np.array(all_queries)        # (N, T)
-            x0_norms_arr = np.array(all_x0_norms)       # (N,)
-            pv_arr       = np.array(all_postverify_ok)  # (N,)
+            norm_array  = np.array(all_norms)          # (N, T) raw
+            query_array = np.array(all_queries)        # (N, T)
+            pv_arr      = np.array(all_postverify_ok)  # (N,)
 
-            # ── running-min L2 curve, capped at ||x0|| ───────────
+            # ── running-min L2 curve ─────────────────────────────
             running_min_arr = np.minimum.accumulate(norm_array, axis=1)
-            running_min_arr = np.minimum(running_min_arr, x0_norms_arr[:, None])
 
-            # per-image best L2 (last value of running-min-capped)
+            # ── init-fallback: 对 post-verify FAIL 图，整条曲线拉平到 norm_initial ──
+            # 理由: 内部 running-min 是"虚假的好"（不 survive re-normalize），
+            #       但初始 random adv 保证 valid，是这张图能拿到的真实最好战绩。
+            init_norms = norm_array[:, 0]              # (N,) 每图的 norm_initial
+            running_min_arr[~pv_arr] = init_norms[~pv_arr, None]
+
+            # per-image best L2 (last value of running-min)
             all_best_l2 = running_min_arr[:, -1]
 
             print(f'★ Median best L2   : {np.median(all_best_l2):.3f}   ← main-table metric')
             print(f'  Mean   best L2   : {np.mean(all_best_l2):.3f}')
-            print(f'  Median ||x0||    : {np.median(x0_norms_arr):.2f}')
+            print(f'  Fail-fallback    : {int((~pv_arr).sum())} img(s) replaced by norm_initial')
             print(f'────────────────────────────────────────────────')
 
             save_dir = 'Non_targeted_results_cifar10'
@@ -170,14 +174,13 @@ for model_name in MODEL_NAMES:
             np.savez(
                 save_path,
                 # ── 原 5 key（与老 driver 完全兼容） ──
-                norm                  = np.median(running_min_arr, 0),   # ← curve 换成 running-min
+                norm                  = np.median(running_min_arr, 0),   # ← curve 换成 running-min (fallback applied)
                 query                 = np.median(query_array,     0),
                 all_norms             = norm_array,
                 all_queries           = query_array,
                 asr                   = asr,
                 # ── 新增 extras ─────────────────────
                 all_norms_running_min = running_min_arr,
-                all_x0_norms          = x0_norms_arr,
                 all_postverify_ok     = pv_arr,
                 all_best_l2           = all_best_l2,
             )

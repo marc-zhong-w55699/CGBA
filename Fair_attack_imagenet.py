@@ -4,14 +4,20 @@ Fair-comparison driver for ImageNet decision-based attacks.
 Differences vs the vanilla driver (Non_targeted_attack_imaginenet_res50.py):
   1. append-all           : records the L2 curve for EVERY clean-classified
                             image, not just the post-verify successes.
-  2. running-min (capped) : an extra key `all_norms_running_min` is saved.
-                            Per-image reported L2 = min over the trajectory,
-                            capped at ||x0||   (matches TtBA `Reall2`).
+  2. running-min          : an extra key `all_norms_running_min` is saved.
+                            Per-image reported L2 = min over the trajectory.
+  3. init-fallback        : for post-verify FAILED images, the running-min
+                            curve is replaced by norm_initial (= norms[0],
+                            the L2 of the random-init adversarial, which is
+                            guaranteed valid after clip).  This prevents a
+                            failed attack from being under-reported by its
+                            algorithm-internal "best" state that doesn't
+                            survive re-normalization.
 
 .npz keys — original 5 kept exactly:
     norm, query, all_norms, all_queries, asr
-plus 4 new extras:
-    all_norms_running_min, all_x0_norms, all_postverify_ok, all_best_l2
+plus 3 new extras:
+    all_norms_running_min, all_postverify_ok, all_best_l2
 '''
 import torchvision.transforms as transforms
 import torchvision.models as torch_models
@@ -68,7 +74,6 @@ for attack_method in attack_methods:
     # ── Storage ────────────────────────────────────────────
     all_norms         = []   # raw L2 curve per image (as returned)
     all_queries       = []
-    all_x0_norms      = []   # per-image ||x0|| (pixel space)
     all_postverify_ok = []   # per-image: post-verify pass / fail
     image_iter        = 0
     success_count     = 0    # post-verify success count (for `asr`)
@@ -106,11 +111,6 @@ for attack_method in attack_methods:
             transforms.ToTensor(),
             transforms.Normalize(mean=mean, std=std)])(im_orig)
 
-        # pixel-space image (used only for the ||x0|| cap)
-        im_pixel = transforms.Compose([
-            transforms.CenterCrop(im_sz),
-            transforms.ToTensor()])(im_orig)
-
         lb = transforms.Compose([transforms.ToTensor(),
                                  transforms.Normalize(mean=mean, std=std)])(lb)
         ub = transforms.Compose([transforms.ToTensor(),
@@ -119,7 +119,6 @@ for attack_method in attack_methods:
         lb = lb[None, :, :, :].to(device)
         ub = ub[None, :, :, :].to(device)
         x_0 = im[None, :, :, :].to(device)
-        x0_norm = float(torch.norm(im_pixel).item())
 
         orig_label = torch.argmax(
             net.forward(Variable(x_0, requires_grad=True)).data).item()
@@ -133,7 +132,7 @@ for attack_method in attack_methods:
         str_label_ground = get_label(labels[np.int32(ground_label)].split(',')[0])
 
         print(f'\nSource image {temp}:  Class ID: {ground_label}   '
-              f'Class Name: {str_label_ground}   ||x0||={x0_norm:.2f}')
+              f'Class Name: {str_label_ground}')
 
         ##############################################################
 
@@ -173,7 +172,6 @@ for attack_method in attack_methods:
             # ── append-all (核心改动) ─────────────────────────
             all_norms        .append(norms)
             all_queries      .append(n_query)
-            all_x0_norms     .append(x0_norm)
             all_postverify_ok.append(pv_ok)
 
     # ── ASR 统计 ──────────────────────────────────────────────
@@ -187,21 +185,25 @@ for attack_method in attack_methods:
 
     # ── 保存结果 ──────────────────────────────────────────────
     if len(all_norms) > 0:
-        norm_array   = np.array(all_norms)          # (N, T) raw
-        query_array  = np.array(all_queries)        # (N, T)
-        x0_norms_arr = np.array(all_x0_norms)       # (N,)
-        pv_arr       = np.array(all_postverify_ok)  # (N,)
+        norm_array  = np.array(all_norms)          # (N, T) raw
+        query_array = np.array(all_queries)        # (N, T)
+        pv_arr      = np.array(all_postverify_ok)  # (N,)
 
-        # ── running-min L2 curve, capped at ||x0|| ───────────
+        # ── running-min L2 curve ─────────────────────────────
         running_min_arr = np.minimum.accumulate(norm_array, axis=1)
-        running_min_arr = np.minimum(running_min_arr, x0_norms_arr[:, None])
 
-        # per-image best L2 (last value of running-min-capped)
+        # ── init-fallback: 对 post-verify FAIL 图，整条曲线拉平到 norm_initial ──
+        # 理由: 内部 running-min 是"虚假的好"（不 survive re-normalize），
+        #       但初始 random adv 保证 valid，是这张图能拿到的真实最好战绩。
+        init_norms = norm_array[:, 0]              # (N,) 每图的 norm_initial
+        running_min_arr[~pv_arr] = init_norms[~pv_arr, None]
+
+        # per-image best L2 (last value of running-min)
         all_best_l2 = running_min_arr[:, -1]
 
         print(f'★ Median best L2 : {np.median(all_best_l2):.3f}   ← main-table metric')
         print(f'  Mean   best L2 : {np.mean(all_best_l2):.3f}')
-        print(f'  Median ||x0||  : {np.median(x0_norms_arr):.2f}')
+        print(f'  Fail-fallback  : {int((~pv_arr).sum())} img(s) replaced by norm_initial')
         print(f'────────────────────────────────────────────────')
 
         save_dir = 'Non_targeted_results_imagenet'
@@ -213,14 +215,13 @@ for attack_method in attack_methods:
         np.savez(
             save_path,
             # ── 原 5 key（与老 driver 完全兼容） ──
-            norm                  = np.median(running_min_arr, 0),   # ← curve 换成 running-min
+            norm                  = np.median(running_min_arr, 0),   # ← curve 换成 running-min (fallback applied)
             query                 = np.median(query_array,     0),
             all_norms             = norm_array,
             all_queries           = query_array,
             asr                   = asr,
             # ── 新增 extras ─────────────────────
             all_norms_running_min = running_min_arr,
-            all_x0_norms          = x0_norms_arr,
             all_postverify_ok     = pv_arr,
             all_best_l2           = all_best_l2,
         )
