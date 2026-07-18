@@ -92,8 +92,8 @@ for attack_method in attack_methods:
     if model_arc == 'efficientnet_b0':
         net = torch_models.efficientnet_b0(pretrained=True)
     if model_arc == 'ViT':
-        import timm
-        net = timm.create_model('vit_base_patch16_224', pretrained=True)
+        # 用 torchvision 的 vit_b_32 (patch=32)，跟 TtBA 主表口径一致
+        net = torch_models.vit_b_32(pretrained=True)
     net = net.to(device)
     net.eval()
 
@@ -147,15 +147,18 @@ for attack_method in attack_methods:
             print(f'\n#{image_iter1}: Source mis-classified, skip.')
             continue
 
-        # ── 挑 target image (TtBA convention) ──────────────────
+        # ── 挑 target image (TtBA convention, 严格 1-to-1) ─────
         # 要求:
         #   (1) target GT class != source GT class
         #   (2) target 图被模型正确分类 (pred == GT)
-        # 满足即用 target GT 作为 tar_label（不用 predicted）
+        # 用 per-source 独立 RandomState → 跨 attack 的 target 采样序列固定，
+        # 不受 attack 内部随机数消耗影响。同一个 image_iter1 拿到的
+        # target 候选列表在 M2D / CGBA / CGBA_H 之间完全一致。
+        rng = np.random.RandomState(992 + image_iter1)
         MAX_TARGET_TRIES = 20
         target_found = False
         for _ in range(MAX_TARGET_TRIES):
-            image_iter2 = int(np.random.choice(range(1, 5000)))
+            image_iter2 = int(rng.choice(range(1, 5000)))
             if image_iter2 == image_iter1:
                 continue
             im_orig_t, temp_t = load_image(image_iter2, im_sz)

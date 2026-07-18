@@ -96,13 +96,17 @@ for model_name in MODEL_NAMES:
                 # 静默 skip；CIFAR clean acc 高，打印会刷屏
                 continue
 
-            # ── 挑 target image (TtBA convention) ────────────────
+            # ── 挑 target image (TtBA convention, 严格 1-to-1) ─────
             # (1) target GT class != source GT class
             # (2) target image 正确分类 (pred == GT)
+            # 用 per-source 独立 RandomState → 跨 attack 的 target 采样序列固定，
+            # 不受 attack 内部随机数消耗影响。同一个 image_iter1 拿到的
+            # target 候选列表在 M2D / CGBA / CGBA_H 之间完全一致。
+            rng = np.random.RandomState(992 + image_iter1)
             MAX_TARGET_TRIES = 20
             target_found = False
             for _ in range(MAX_TARGET_TRIES):
-                image_iter2 = int(np.random.choice(n_test))
+                image_iter2 = int(rng.choice(n_test))
                 if image_iter2 == image_iter1:
                     continue
                 im_pil_t, tar_gt = cifar10_test[image_iter2]
