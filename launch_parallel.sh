@@ -1,54 +1,77 @@
 #!/bin/bash
 # launch_parallel.sh
 #
-# 并行启动多个 Fair driver（一个 script 一个 tmux window + 独立 log）
+# 一个 attack driver × N 个 model 并行跑
+# 自动复制 driver，改 MODEL_NAMES 或 model_arc，独立 tmux + log
 #
 # 用法:
-#   bash launch_parallel.sh Fair_attack_cifar10.py Fair_cgba_cifar10.py Fair_cgbah_cifar10.py
-#   bash launch_parallel.sh Fair_attack_imagenet.py
+#   bash launch_parallel.sh <driver.py> <model1> <model2> [model3] ...
 #
-# 每个 script 会：
-#   - 在独立 tmux session 中跑 (session 名 = 文件名去掉 .py)
-#   - stdout/stderr 存到 logs/<session_name>.log
+# 示例 (CIFAR M2D on 3 models):
+#   bash launch_parallel.sh Fair_attack_cifar10.py preactresnet18 wideresnet40_2 vit
+#
+# 示例 (CIFAR CGBA on 3 models):
+#   bash launch_parallel.sh Fair_cgba_cifar10.py preactresnet18 wideresnet40_2 vit
+#
+# 示例 (ImageNet M2D on 4 models):
+#   bash launch_parallel.sh Fair_attack_imagenet.py resnet50 vgg19 inception_v3 ViT
 #
 # 监控:
-#   tmux ls                        # 列出所有 session
-#   tmux attach -t <session_name>  # 进入某个 session (Ctrl+B, D 退出)
-#   tail -f logs/*.log             # 实时看所有 log
+#   tmux ls
+#   tmux attach -t <session>       (Ctrl+B, D 退出)
+#   tail -f /root/autodl-tmp/logs/*.log
+#
+# 停止:
+#   tmux kill-session -t <session>
+#   tmux kill-server               # 全停
 
 set -e
 
 LOG_DIR="${LOG_DIR:-/root/autodl-tmp/logs}"
 mkdir -p "$LOG_DIR"
 
-if [ $# -eq 0 ]; then
-    echo "Usage: bash $0 <script1.py> [script2.py] [script3.py] ..."
+if [ $# -lt 2 ]; then
+    echo "Usage: bash $0 <driver.py> <model1> [model2] [model3] ..."
     echo ""
-    echo "Example:"
-    echo "  bash $0 Fair_attack_cifar10.py Fair_cgba_cifar10.py Fair_cgbah_cifar10.py Fair_Surfree_cifar10.py"
+    echo "示例:"
+    echo "  bash $0 Fair_attack_cifar10.py preactresnet18 wideresnet40_2 vit"
+    echo "  bash $0 Fair_cgba_imagenet.py resnet50 vgg19 inception_v3 ViT"
     exit 1
 fi
 
-echo "── Launching ${#} scripts in parallel ─────────"
+driver="$1"
+shift
+models=("$@")
 
-for script in "$@"; do
-    if [ ! -f "$script" ]; then
-        echo "  ✗ File not found: $script (skip)"
-        continue
-    fi
+if [ ! -f "$driver" ]; then
+    echo "✗ Driver not found: $driver"
+    exit 1
+fi
 
-    # session 名 = 文件名 (去 .py)
-    session_name=$(basename "$script" .py)
+# 去 .py 后缀作为 base name
+base=$(basename "$driver" .py)
+
+echo "── 并行启动 [$driver] × ${#models[@]} models ──────────"
+
+for model in "${models[@]}"; do
+    # 复制 driver: Fair_attack_cifar10.py → Fair_attack_cifar10_<model>.py
+    copy_name="${base}_${model}.py"
+    cp "$driver" "$copy_name"
+
+    # 用 sed 改 MODEL_NAMES (CIFAR) 或 model_arc (ImageNet)
+    # 两条 sed 都跑，只影响存在的那种模式
+    sed -i "s/^MODEL_NAMES\s*=.*/MODEL_NAMES = ['$model']/" "$copy_name"
+    sed -i "s/^model_arc\s*=.*/model_arc = '$model'/" "$copy_name"
+
+    session_name="${base}_${model}"
     log_file="$LOG_DIR/${session_name}.log"
 
-    # 已经在跑就跳过
-    if tmux has-session -t "$session_name" 2>/dev/null; then
-        echo "  ⚠ [$session_name] 已在跑 (tmux session 存在)，跳过"
-        continue
-    fi
+    # 如果已在跑就先 kill
+    tmux kill-session -t "$session_name" 2>/dev/null || true
 
     tmux new-session -d -s "$session_name" \
-        "python $script 2>&1 | tee $log_file"
+        "python $copy_name 2>&1 | tee $log_file"
+
     echo "  ✓ [$session_name] → $log_file"
 done
 
@@ -57,6 +80,6 @@ echo "所有 session:"
 tmux ls 2>/dev/null || echo "(无)"
 
 echo ""
-echo "查看某个 session:  tmux attach -t <name>   (Ctrl+B, D 退出)"
-echo "实时看 log:        tail -f $LOG_DIR/*.log"
-echo "杀掉所有 session:  tmux kill-server"
+echo "查看 log:      tail -f $LOG_DIR/*.log"
+echo "进入 session:  tmux attach -t <name>   (Ctrl+B, D 退出)"
+echo "全部停止:      tmux kill-server"
