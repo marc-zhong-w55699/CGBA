@@ -28,7 +28,7 @@ CIFAR10_CLASSES = [
     'dog', 'frog', 'horse', 'ship', 'truck'
 ]
 num_img          = 1000
-iteration        = 2500
+iteration        = 60
 attack_methods   = ['CGBA_H']
 dim_reduc_factor = 4
 
