@@ -30,7 +30,7 @@ CIFAR10_CLASSES = [
 num_img          = 1000
 iteration        = 59
 attack_methods   = ['CGBA_H']
-dim_reduc_factor = 4
+dim_reduc_factor = 1
 
 mean = [0.4914, 0.4822, 0.4465]
 std  = [0.2023, 0.1994, 0.2010]
