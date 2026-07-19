@@ -52,7 +52,7 @@ std  = [0.2023, 0.1994, 0.2010]
 
 # ── 数据 ──────────────────────────────────────────────────────────────────────
 cifar10_test = datasets.CIFAR10(
-    root='./data', train=False, download=True, transform=None
+    root='./data', train=False, download=False, transform=None
 )
 tf_normalize = transforms.Compose([
     transforms.ToTensor(),
