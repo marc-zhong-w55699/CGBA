@@ -38,7 +38,6 @@ CIFAR10_CLASSES = [
 pair_num         = 100         # ← (source, target) 对数
 iteration        = 2500
 attack_methods   = ['Manifold2D']
-dim_reduc_factor = 4
 
 mean = [0.4914, 0.4822, 0.4465]
 std  = [0.2023, 0.1994, 0.2010]
@@ -130,13 +129,11 @@ for model_name in MODEL_NAMES:
             print(f'[{image_iter}/{pair_num}]')
             print('#' * 60)
             print(f'Start: {attack_method} TARGETED | '
-                  f'iterations={iteration} | '
-                  f'dim_reduc_factor={dim_reduc_factor}')
+                  f'iterations={iteration}')
             print('#' * 60)
             t3 = time.time()
             attack = Proposed_attack(
                 net, x_0, mean, std, lb, ub,
-                dim_reduc_factor=dim_reduc_factor,
                 tar_img=x_0_t,
                 attack_method=attack_method,
                 iteration=iteration,
@@ -198,7 +195,6 @@ for model_name in MODEL_NAMES:
             save_dir = 'Targeted_results_cifar10'
             os.makedirs(save_dir, exist_ok=True)
             save_path = (f'{save_dir}/{attack_method}_Tar_{model_name}'
-             f'_dimReducFac_{dim_reduc_factor}'
              f'_imgNum_{pair_num}_iteration_{iteration}'
              f'_{VARIANT_SUFFIX}')
             np.savez(
