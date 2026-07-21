@@ -1,18 +1,11 @@
 '''
-Fair-comparison driver for ImageNet decision-based attacks.
+Fair-comparison driver for ImageNet M2D (non-targeted).
+Loads from Kaggle imagenet-mini (1000 classes, ~3923 val imgs).
 
-Differences vs the vanilla driver (Non_targeted_attack_imaginenet_res50.py):
-  1. append-all           : records the L2 curve for EVERY clean-classified
-                            image, not just the post-verify successes.
-  2. running-min          : an extra key `all_norms_running_min` is saved.
-                            Per-image reported L2 = min over the trajectory.
-  3. init-fallback        : for post-verify FAILED images, the running-min
-                            curve is replaced by norm_initial (= norms[0],
-                            the L2 of the random-init adversarial, which is
-                            guaranteed valid after clip).  This prevents a
-                            failed attack from being under-reported by its
-                            algorithm-internal "best" state that doesn't
-                            survive re-normalization.
+Differences vs the vanilla driver:
+  1. append-all           : records L2 curve for EVERY clean-classified img
+  2. running-min          : reports per-img L2 = min over trajectory
+  3. init-fallback        : failed post-verify images fall back to norm_initial
 
 .npz keys — original 5 kept exactly:
     norm, query, all_norms, all_queries, asr
@@ -21,13 +14,12 @@ plus 3 new extras:
 '''
 import torchvision.transforms as transforms
 import torchvision.models as torch_models
+from torchvision.datasets import ImageFolder
 import numpy as np
 import torch
 import os
-from utils import get_label
 from utils import valid_bounds
 from PIL import Image
-from torch.autograd import Variable
 import time
 from M2D_random_dct_v11_imagenet import Proposed_attack
 VARIANT_SUFFIX = 'random_dct_v11_fair'   # ← 改这里区分变体
@@ -39,73 +31,64 @@ np.random.seed(992)
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 ##############################################################################
 
-num_img          = 100
-iteration        = 2500
-model_arc        = 'resnet50'   # 'resnet50' / 'vgg16' / 'vgg19' / 'ViT'
-                                #  / 'inception_v3' / 'efficientnet_b0'
+num_img          = 1000
+iteration        = 2500        # M2D 标准 iter
+model_arc        = 'resnet50'  # 'resnet50' / 'vgg19' / 'inception_v3' / 'ViT'
 attack_methods   = ['Manifold2D']
-dim_reduc_factor = 4
+# 注意：M2D ImageNet 的 DCT 维度是模块内自定义，不接受外部 dim_reduc_factor
 
 mean = [0.485, 0.456, 0.406]
 std  = [0.229, 0.224, 0.225]
 
+# ── Kaggle imagenet-mini val root ────────────────────────────────────────────
+imnet_val_root = '/root/autodl-tmp/data/imagenet-mini/imagenet-mini/val'
+
 for attack_method in attack_methods:
-    # ── Model ──────────────────────────────────────────────
     if model_arc == 'resnet50':
         net = torch_models.resnet50(pretrained=True)
-    if model_arc == 'resnet101':
+    elif model_arc == 'resnet101':
         net = torch_models.resnet101(pretrained=True)
-    if model_arc == 'vgg16':
+    elif model_arc == 'vgg16':
         net = torch_models.vgg16(pretrained=True)
-    if model_arc == 'vgg19':
+    elif model_arc == 'vgg19':
         net = torch_models.vgg19(pretrained=True)
-    if model_arc == 'inception_v3':
+    elif model_arc == 'inception_v3':
         net = torch_models.inception_v3(pretrained=True, aux_logits=True)
-    if model_arc == 'efficientnet_b0':
+    elif model_arc == 'efficientnet_b0':
         net = torch_models.efficientnet_b0(pretrained=True)
-    if model_arc == 'ViT':
-        # 用 torchvision 的 vit_b_32 (patch=32)，跟 TtBA 主表口径一致
+    elif model_arc == 'ViT':
         net = torch_models.vit_b_32(pretrained=True)
     net = net.to(device)
     net.eval()
 
     im_sz = 299 if model_arc == 'inception_v3' else 224
 
-    # ── Storage ────────────────────────────────────────────
-    all_norms         = []   # raw L2 curve per image (as returned)
-    all_queries       = []
-    all_postverify_ok = []   # per-image: post-verify pass / fail
-    image_iter        = 0
-    success_count     = 0    # post-verify success count (for `asr`)
+    # ── 加载 val 集 + 固定 seed=992 打乱 ───────────────────────────────
+    # 与 Fair_cgba_imagenet.py / Fair_cgbah_imagenet.py 完全一致的 permutation
+    # → M2D / CGBA / CGBA_H 看到相同的 1000 张图，可 pair-wise 比较
+    imnet_val = ImageFolder(imnet_val_root)
+    rng = np.random.RandomState(992)
+    idx_perm = rng.permutation(len(imnet_val))
+    print(f'Loaded {len(imnet_val)} val images from {imnet_val_root}')
+    print(f'Will iterate seeded permutation, take first {num_img} correctly-classified')
 
-    for image_iter1 in range(1, 300):   # scan up to 300 to find num_img clean
+    all_norms         = []
+    all_queries       = []
+    all_postverify_ok = []
+    image_iter        = 0
+    success_count     = 0
+
+    for perm_i, image_iter1 in enumerate(idx_perm):
         if image_iter >= num_img:
             break
-        if len(str(image_iter1)) == 1:
-            temp = "000" + str(image_iter1)
-        if len(str(image_iter1)) == 2:
-            temp = "00" + str(image_iter1)
-        if len(str(image_iter1)) == 3:
-            temp = "0" + str(image_iter1)
-        if len(str(image_iter1)) == 4:
-            temp = str(image_iter1)
-        img_name = "ILSVRC2012_val_0000" + temp + ".JPEG"
-        img_path = "Image_path/ImageNet/val"
 
-        t11 = time.time()
-
-        try:
-            im_orig = Image.open(os.path.join(img_path, img_name)).convert('RGB')
-        except FileNotFoundError:
-            print(f'#{image_iter1}: file missing, skip')
-            continue
-
-        im_orig = transforms.Compose([transforms.Resize((im_sz, im_sz))])(im_orig)
+        im_orig, ground_label_int = imnet_val[int(image_iter1)]
+        im_orig = im_orig.convert('RGB')
+        im_orig = transforms.Resize((im_sz, im_sz))(im_orig)
 
         delta = 255
         lb, ub = valid_bounds(im_orig, delta)
 
-        # normalized image (fed to network + attack)
         im = transforms.Compose([
             transforms.CenterCrop(im_sz),
             transforms.ToTensor(),
@@ -116,65 +99,48 @@ for attack_method in attack_methods:
         ub = transforms.Compose([transforms.ToTensor(),
                                  transforms.Normalize(mean=mean, std=std)])(ub)
 
-        lb = lb[None, :, :, :].to(device)
-        ub = ub[None, :, :, :].to(device)
+        lb  = lb[None, :, :, :].to(device)
+        ub  = ub[None, :, :, :].to(device)
         x_0 = im[None, :, :, :].to(device)
 
-        orig_label = torch.argmax(
-            net.forward(Variable(x_0, requires_grad=True)).data).item()
-        labels = open(os.path.join('synset_words.txt'), 'r').read().split('\n')
-        str_label_orig = get_label(labels[np.int32(orig_label)].split(',')[0])
+        with torch.no_grad():
+            orig_label = torch.argmax(net(x_0)).item()
 
-        ground_truth = open(os.path.join('val.txt'), 'r').read().split('\n')
-        ground_name_label = ground_truth[image_iter1 - 1]
-        ground_label = ground_name_label.split()[1]
-        ground_label_int = int(ground_label)
-        str_label_ground = get_label(labels[np.int32(ground_label)].split(',')[0])
+        print(f'\nImage idx={int(image_iter1):05d} (perm #{perm_i}): '
+              f'GT={ground_label_int}  Pred={orig_label}')
 
-        print(f'\nSource image {temp}:  Class ID: {ground_label}   '
-              f'Class Name: {str_label_ground}')
+        if ground_label_int != orig_label:
+            print('Already misclassified, skip.')
+            continue
 
-        ##############################################################
+        image_iter += 1
+        print(f'[{image_iter}/{num_img}]')
+        print('#' * 60)
+        print(f'Start: {attack_method} | iterations={iteration}')
+        print('#' * 60)
 
-        if ground_label_int != int(orig_label):
-            print('Already missclassified ... Lets try another one!')
+        t3 = time.time()
+        attack = Proposed_attack(net, x_0, mean, std, lb, ub,
+                                 attack_method=attack_method,
+                                 iteration=iteration)
+        x_adv, n_query, norms = attack.Attack()
+        t4 = time.time()
+        print(f'Done in {t4 - t3:.2f}s')
+
+        with torch.no_grad():
+            adv_label = torch.argmax(net(x_adv)).item()
+        if adv_label != ground_label_int:
+            print(f'Attack SUCCESS: GT={ground_label_int} → adv={adv_label}')
+            success_count += 1
+            pv_ok = True
         else:
-            image_iter = image_iter + 1
-            print('Image number good to go: ', image_iter)
+            print(f'Attack FAILED: still predicted as {ground_label_int}')
+            pv_ok = False
 
-            print('#' * 60)
-            print(f'Start: {attack_method} non-targeted will be run for '
-                  f'{iteration} iterations with dim_reduc_factor: {dim_reduc_factor}')
-            print('#' * 60)
+        all_norms        .append(norms)
+        all_queries      .append(n_query)
+        all_postverify_ok.append(pv_ok)
 
-            t3 = time.time()
-            attack = Proposed_attack(net, x_0, mean, std, lb, ub,
-                                     dim_reduc_factor=dim_reduc_factor,
-                                     attack_method=attack_method,
-                                     iteration=iteration)
-            x_adv, n_query, norms = attack.Attack()
-            t4 = time.time()
-            print(f'##################### End Itetations:  took '
-                  f'{t4 - t3:.3f} sec #########################')
-
-            # ── 验证攻击是否成功（informational; 不 gate append） ──
-            with torch.no_grad():
-                adv_label = torch.argmax(net(x_adv)).item()
-            if adv_label != ground_label_int:
-                str_label_adv = get_label(labels[np.int32(adv_label)].split(',')[0])
-                print(f'Attack SUCCESS: {str_label_ground} → {str_label_adv}')
-                success_count += 1
-                pv_ok = True
-            else:
-                print(f'Attack FAILED: still predicted as {str_label_ground}')
-                pv_ok = False
-
-            # ── append-all (核心改动) ─────────────────────────
-            all_norms        .append(norms)
-            all_queries      .append(n_query)
-            all_postverify_ok.append(pv_ok)
-
-    # ── ASR 统计 ──────────────────────────────────────────────
     asr = success_count / image_iter * 100 if image_iter > 0 else 0
     print(f'\n── Attack Summary ──────────────────────────────')
     print(f'Model         : {model_arc}')
@@ -183,22 +149,15 @@ for attack_method in attack_methods:
     print(f'Success       : {success_count}')
     print(f'ASR (post-verify) : {asr:.1f}%')
 
-    # ── 保存结果 ──────────────────────────────────────────────
     if len(all_norms) > 0:
-        norm_array  = np.array(all_norms)          # (N, T) raw
-        query_array = np.array(all_queries)        # (N, T)
-        pv_arr      = np.array(all_postverify_ok)  # (N,)
+        norm_array  = np.array(all_norms)
+        query_array = np.array(all_queries)
+        pv_arr      = np.array(all_postverify_ok)
 
-        # ── running-min L2 curve ─────────────────────────────
         running_min_arr = np.minimum.accumulate(norm_array, axis=1)
-
-        # ── init-fallback: 对 post-verify FAIL 图，整条曲线拉平到 norm_initial ──
-        # 理由: 内部 running-min 是"虚假的好"（不 survive re-normalize），
-        #       但初始 random adv 保证 valid，是这张图能拿到的真实最好战绩。
-        init_norms = norm_array[:, 0]              # (N,) 每图的 norm_initial
+        init_norms = norm_array[:, 0]
         running_min_arr[~pv_arr] = init_norms[~pv_arr, None]
 
-        # per-image best L2 (last value of running-min)
         all_best_l2 = running_min_arr[:, -1]
 
         print(f'★ Median best L2 : {np.median(all_best_l2):.3f}   ← main-table metric')
@@ -209,18 +168,15 @@ for attack_method in attack_methods:
         save_dir = 'Non_targeted_results_imagenet'
         os.makedirs(save_dir, exist_ok=True)
         save_path = (f'{save_dir}/{attack_method}_nonTar_{model_arc}'
-                     f'_dimReducFac_{dim_reduc_factor}'
                      f'_imgNum_{num_img}_iteration_{iteration}'
                      f'_{VARIANT_SUFFIX}')
         np.savez(
             save_path,
-            # ── 原 5 key（与老 driver 完全兼容） ──
-            norm                  = np.median(running_min_arr, 0),   # ← curve 换成 running-min (fallback applied)
+            norm                  = np.median(running_min_arr, 0),
             query                 = np.median(query_array,     0),
             all_norms             = norm_array,
             all_queries           = query_array,
             asr                   = asr,
-            # ── 新增 extras ─────────────────────
             all_norms_running_min = running_min_arr,
             all_postverify_ok     = pv_arr,
             all_best_l2           = all_best_l2,

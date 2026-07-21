@@ -25,7 +25,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 ##############################################################################
 
 num_img          = 1000
-iteration        = 59            # ← CGBA 论文 iter；~10k query budget
+iteration        = 60          # ← CGBA 论文 iter；~10k query budget
 model_arc        = 'resnet50'    # 'resnet50' / 'vgg19' / 'inception_v3' / 'ViT'
 attack_methods   = ['CGBA_H']
 dim_reduc_factor = 4
